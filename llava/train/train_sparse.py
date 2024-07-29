@@ -155,7 +155,7 @@ class SparseArguments:
 
     maskclip: Optional[str] = field(default=None)
     maskclip_distill_token_rate: float = 0.1
-    maskclip_distill_loss_weight: float = 5.0
+    maskclip_distill_loss_weight: float = 1.0
     similar_postive_num: int = 5
 
 

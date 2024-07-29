@@ -130,11 +130,18 @@ class DynamicLlavaMetaModel:
         maskclip_model = getattr(self, "maskclip_model", None)
         maskclip_preprocess = getattr(self, "maskclip_preprocess", None)
         full_negative_classes_names = getattr(self, "full_negative_classes_names", None)
+        negative_maskclip_text_embeddings = maskclip.generate_text_embeddings(
+            maskclip_model,
+            full_negative_classes_names,
+            templates=None,
+            device=self.device,
+        )
         llm_tokenizer = getattr(self, "llm_tokenizer", None)
         return (
             maskclip_model,
             maskclip_preprocess,
             full_negative_classes_names,
+            negative_maskclip_text_embeddings,
             llm_tokenizer,
         )
 
@@ -358,6 +365,7 @@ class DynamicLlavaMetaForCausalLM(ABC):
             maskclip_model,
             maskclip_preprocess,
             full_negative_classes_names,
+            negative_maskclip_text_embeddings,
             llm_tokenizer,
         ) = self.get_maskclip()
         # ----------------------------------------------------------#
@@ -520,25 +528,44 @@ class DynamicLlavaMetaForCausalLM(ABC):
                         cur_last_instruct_start_position:cur_last_instruct_end_position
                     ]
 
-                    postive_classes_names = llm_tokenizer.decode(
-                        torch.cat([cur_last_instruct_ids, cur_answer_ids[:-1]])
-                    )
-
-                    # for max 77 token of clip tokenizer
-                    postive_classes_names = postive_classes_names[
-                        : min((len(postive_classes_names), 77))
+                    postive_classes_names = [
+                        llm_tokenizer.decode(
+                            torch.cat([cur_last_instruct_ids, cur_answer_ids[:-1]])
+                        )
                     ]
 
-                    full_classes_names = [
-                        postive_classes_names
-                    ] + full_negative_classes_names
+                    # # for max 77 token of clip tokenizer
+                    # postive_classes_names = postive_classes_names[:][
+                    #     : min(len(postive_classes_names[0]), 77)
+                    # ]
 
-                    maskclip_text_embeddings = maskclip.generate_text_embeddings(
-                        maskclip_model,
-                        full_classes_names,
-                        templates=None,
-                        device=self.device,
+                    # full_classes_names = [
+                    #     postive_classes_names
+                    # ] + full_negative_classes_names
+                    # maskclip_text_embeddings = maskclip.generate_text_embeddings(
+                    #     maskclip_model,
+                    #     full_classes_names,
+                    #     templates=None,
+                    #     device=self.device,
+                    # )
+
+                    postive_maskclip_text_embeddings = (
+                        maskclip.generate_text_embeddings(
+                            maskclip_model,
+                            postive_classes_names,
+                            templates=None,
+                            device=self.device,
+                            truncate=True,
+                        )
                     )
+                    maskclip_text_embeddings = torch.cat(
+                        [
+                            postive_maskclip_text_embeddings,
+                            negative_maskclip_text_embeddings,
+                        ],
+                        dim=0,
+                    )
+
                     similarity = F.cosine_similarity(
                         maskclip_text_embeddings[1:],
                         maskclip_text_embeddings[:1].expand_as(

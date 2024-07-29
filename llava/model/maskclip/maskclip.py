@@ -399,6 +399,7 @@ def generate_text_embeddings(
     device: Union[str, torch.device] = "cuda:0" if torch.cuda.is_available() else "cpu",
     feature_layer: int = None,
     context_length: int = 77,
+    truncate: bool = False,
 ) -> torch.Tensor:
     """
     Returns the tokenized representation of given input string(s)
@@ -442,7 +443,9 @@ def generate_text_embeddings(
             texts = [
                 template.format(classname) for template in templates
             ]  # format with class
-        texts = tokenize(texts, context_length=context_length).to(device)  # tokenize
+        texts = tokenize(texts, context_length=context_length, truncate=truncate).to(
+            device
+        )  # tokenize
         class_embeddings = model.encode_text(
             texts, feature_layer=feature_layer
         )  # embed with text encoder

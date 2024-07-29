@@ -1468,6 +1468,26 @@ def weight_merging(select_token, unselect_token):
     pass
 
 
+def ste_argmax(logits: torch.Tensor, dim: int = -1):
+    y_soft = logits
+    index = y_soft.max(dim, keepdim=True)[1]
+    y_hard = torch.zeros_like(
+        logits, memory_format=torch.legacy_contiguous_format
+    ).scatter_(dim, index, 1.0)
+    ret = y_hard - y_soft.detach() + y_soft
+    return ret
+
+
+def ste_topk(logits: torch.Tensor, k: int, dim: int = -1):
+    y_soft = logits
+    index = y_soft.topk(k=k, dim=dim, largest=True, sorted=False)[1]
+    y_hard = torch.zeros_like(
+        logits, memory_format=torch.legacy_contiguous_format
+    ).scatter_(dim, index, 1.0)
+    ret = y_hard - y_soft.detach() + y_soft
+    return ret
+
+
 # def batch_index_select(x, idx):
 #     if len(x.size()) == 3:
 #         B, N, C = x.size()
@@ -1525,6 +1545,7 @@ class DynamicModelOutputWithPast(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     masks: Optional[List[torch.FloatTensor]] = None
+    distill_masks: Optional[List[torch.FloatTensor]] = None
 
 
 LLAMA_START_DOCSTRING = r"""
@@ -1799,6 +1820,7 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
         init_n = hidden_states.shape[1]
         policy = None
         masks = []
+        distill_masks = []
         if input_embeds_indices is not None and hidden_states.shape[0] == len(
             input_embeds_indices
         ):
@@ -1862,6 +1884,16 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                         [left_policy, hard_keep_decision, right_policy], dim=1
                     )
                     image_prev_decision = hard_keep_decision
+
+                    # # for maskclip distill loss
+                    # if self.sparse_config["maskclip"] is not None:
+                    #     score = pred_score[:, :, 0]
+                    #     num_keep_node = int(
+                    #         init_image_n
+                    #         * self.sparse_config["maskclip_distill_token_rate"]
+                    #     )
+                    #     distill_hard_keep_decision = ste_topk(score, num_keep_node)
+                    #     distill_masks.append(distill_hard_keep_decision)
                 else:
                     score = pred_score[:, :, 0]
                     num_keep_node = int(
@@ -2015,6 +2047,7 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
             masks=masks,
+            distill_masks=distill_masks,
         )
 
 
@@ -2165,6 +2198,19 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
                 loss = loss + self.config.sparse_config["mask_loss_weight"] * mask_loss
             # ----------------------------------------------------------#
 
+            # # ----------------------------------------------------------#
+            # if maskclip_mask is not None and len(maskclip_mask):
+            #     maskclip_distill_loss = 0.0
+            #     for distill_mask in outputs.distill_masks:
+            #         maskclip_distill_loss = maskclip_distill_loss + F.smooth_l1_loss(
+            #             distill_mask, maskclip_mask
+            #         )
+            #     loss = (
+            #         loss
+            #         + self.config.sparse_config["maskclip_distill_loss_weight"]
+            #         * maskclip_distill_loss
+            #     )
+            # # ----------------------------------------------------------#
             # ----------------------------------------------------------#
             if maskclip_mask is not None and len(maskclip_mask):
                 maskclip_distill_loss = 0.0
