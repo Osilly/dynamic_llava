@@ -114,6 +114,7 @@ class MaskCLIPAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         causal_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = False,
+        requires_qkv: Optional[bool] = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
 
@@ -197,25 +198,35 @@ class MaskCLIPAttention(nn.Module):
         attn_output = self.out_proj(attn_output)
 
         # ----------------------------------------------------------#
-        query_states = query_states.view(bsz, self.num_heads, tgt_len, self.head_dim)
-        query_states = query_states.transpose(1, 2)
-        query_states = query_states.reshape(bsz, tgt_len, embed_dim)
-        query_states = self.out_proj(query_states)
-        key_states = key_states.view(bsz, self.num_heads, tgt_len, self.head_dim)
-        key_states = key_states.transpose(1, 2)
-        key_states = key_states.reshape(bsz, tgt_len, embed_dim)
-        key_states = self.out_proj(key_states)
-        value_states = value_states.view(bsz, self.num_heads, tgt_len, self.head_dim)
-        value_states = value_states.transpose(1, 2)
-        value_states = value_states.reshape(bsz, tgt_len, embed_dim)
-        value_states = self.out_proj(value_states)
+        if requires_qkv:
+            query_states = query_states.view(
+                bsz, self.num_heads, tgt_len, self.head_dim
+            )
+            query_states = query_states.transpose(1, 2)
+            query_states = query_states.reshape(bsz, tgt_len, embed_dim)
+            query_states = self.out_proj(query_states)
+            key_states = key_states.view(bsz, self.num_heads, tgt_len, self.head_dim)
+            key_states = key_states.transpose(1, 2)
+            key_states = key_states.reshape(bsz, tgt_len, embed_dim)
+            key_states = self.out_proj(key_states)
+            value_states = value_states.view(
+                bsz, self.num_heads, tgt_len, self.head_dim
+            )
+            value_states = value_states.transpose(1, 2)
+            value_states = value_states.reshape(bsz, tgt_len, embed_dim)
+            value_states = self.out_proj(value_states)
+            return (
+                attn_output,
+                attn_weights_reshaped,
+                (query_states, key_states, value_states),
+            )
+        else:
+            return (
+                attn_output,
+                attn_weights_reshaped,
+                (None, None, None),
+            )
         # ----------------------------------------------------------#
-
-        return (
-            attn_output,
-            attn_weights_reshaped,
-            (query_states, key_states, value_states),
-        )
 
 
 class MaskCLIPEncoderLayer(nn.Module):
@@ -233,6 +244,7 @@ class MaskCLIPEncoderLayer(nn.Module):
         attention_mask: torch.Tensor,
         causal_attention_mask: torch.Tensor,
         output_attentions: Optional[bool] = False,
+        requires_qkv: Optional[bool] = False,
     ) -> Tuple[torch.FloatTensor]:
         """
         Args:
@@ -254,19 +266,19 @@ class MaskCLIPEncoderLayer(nn.Module):
                 attention_mask=attention_mask,
                 causal_attention_mask=causal_attention_mask,
                 output_attentions=output_attentions,
+                requires_qkv=requires_qkv,
             )
         )
         hidden_states = residual + hidden_states
-        # value_states = value_states + residual
-        # ----------------------------------------------------------#
 
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         # ----------------------------------------------------------#
-        value_states = value_states + hidden_states
-        # value_states = self.mlp(self.layer_norm2(value_states)) + value_states
+        if requires_qkv:
+            value_states = value_states + hidden_states
+            # value_states = self.mlp(self.layer_norm2(value_states)) + value_states
         # ----------------------------------------------------------#
 
         outputs = (hidden_states,)
@@ -355,6 +367,10 @@ class MaskCLIPEncoder(nn.Module):
                 encoder_states = encoder_states + (hidden_states,)
 
             # ----------------------------------------------------------#
+            if idx == len(self.layers) - 1:
+                requires_qkv = True
+            else:
+                requires_qkv = False
             if self.gradient_checkpointing and self.training:
                 layer_outputs, (query_states, key_states, value_states) = (
                     self._gradient_checkpointing_func(
@@ -363,6 +379,7 @@ class MaskCLIPEncoder(nn.Module):
                         attention_mask,
                         causal_attention_mask,
                         output_attentions,
+                        requires_qkv,
                     )
                 )
             else:
@@ -371,6 +388,7 @@ class MaskCLIPEncoder(nn.Module):
                     attention_mask,
                     causal_attention_mask,
                     output_attentions=output_attentions,
+                    requires_qkv=requires_qkv,
                 )
             # ----------------------------------------------------------#
 
