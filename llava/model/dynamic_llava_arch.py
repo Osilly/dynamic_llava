@@ -130,12 +130,13 @@ class DynamicLlavaMetaModel:
         maskclip_model = getattr(self, "maskclip_model", None)
         maskclip_preprocess = getattr(self, "maskclip_preprocess", None)
         full_negative_classes_names = getattr(self, "full_negative_classes_names", None)
-        negative_maskclip_text_embeddings = maskclip.generate_text_embeddings(
-            maskclip_model,
-            full_negative_classes_names,
-            templates=None,
-            device=self.device,
-        )
+        with torch.no_grad():
+            negative_maskclip_text_embeddings = maskclip.generate_text_embeddings(
+                maskclip_model,
+                full_negative_classes_names,
+                templates=None,
+                device=self.device,
+            )
         llm_tokenizer = getattr(self, "llm_tokenizer", None)
         return (
             maskclip_model,
