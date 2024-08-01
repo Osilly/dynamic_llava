@@ -2215,8 +2215,23 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
             if maskclip_mask is not None and len(maskclip_mask):
                 maskclip_distill_loss = 0.0
                 for mask in outputs.masks:
-                    maskclip_distill_loss = maskclip_distill_loss + F.smooth_l1_loss(
-                        mask, maskclip_mask
+                    # lovasz loss
+                    # maskclip_distill_loss = maskclip_distill_loss + F.l1_loss(
+                    #     mask, maskclip_mask
+                    # )
+
+                    # lovasz loss
+                    # from .lovasz_loss import lovasz_hinge
+                    # maskclip_distill_loss = maskclip_distill_loss + lovasz_hinge(
+                    #     mask, maskclip_mask, per_image=True
+                    # )
+
+                    # bce loss
+                    maskclip_distill_loss = (
+                        maskclip_distill_loss
+                        + F.binary_cross_entropy_with_logits(
+                            (mask - 0.5) * 10, maskclip_mask.float()
+                        )
                     )
                 loss = (
                     loss

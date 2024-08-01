@@ -191,6 +191,7 @@ class LengthGroupedSampler(Sampler):
         return iter(indices)
 
 
+@torch.no_grad()
 def forward_hook(forward_data, module, input, output):
     # print(f"Inside {module.__class__.__name__} forward")
     forward_data["inputs"] = input
@@ -215,6 +216,12 @@ class CustomCallback(TrainerCallback):
             forward_hook_function
         )
 
+        # self.forward_data_1 = {"inputs": None, "outputs": None}
+        # forward_hook_function_1 = partial(forward_hook, self.forward_data_1)
+        # self.inserted_forward_hook_1 = kwargs["model"].register_forward_hook(
+        #     forward_hook_function_1
+        # )
+
     def on_train_end(
         self,
         args: TrainingArguments,
@@ -226,6 +233,7 @@ class CustomCallback(TrainerCallback):
         Event called at the end of training.
         """
         self.inserted_forward_hook.remove()
+        # self.inserted_forward_hook_1.remove()
 
     def on_step_begin(
         self,
@@ -491,8 +499,8 @@ class DynamicLLaVATrainer(Trainer):
                 4,
             )
 
-            # mask loss
             with torch.no_grad():
+                # mask loss
                 masks = (
                     self.callback_handler.__dict__["callbacks"][-1]
                     .forward_data["outputs"]
@@ -516,6 +524,11 @@ class DynamicLLaVATrainer(Trainer):
                         self.model.config.sparse_config["mask_loss_weight"] * mask_loss
                     )
                     logs["mask_loss"] = round(mask_loss, 4)
+
+                    # # maskclip loss
+                    # maskclip_mask = self.callback_handler.__dict__["callbacks"][
+                    #     -1
+                    # ].forward_data_1
 
             logs["llm_learning_rate"] = self.lr_scheduler.get_last_lr()[2]
             logs["predictor_learning_rate"] = self.lr_scheduler.get_last_lr()[0]
