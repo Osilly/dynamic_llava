@@ -32,12 +32,7 @@ from llava.constants import (
 
 from llava.mm_utils import get_anyres_image_grid_shape
 
-from .maskclip import maskclip
-from .maskclip.utils.classes import (
-    stuff_classes,
-    all_pascal_context_classes,
-    bg_classes,
-)
+from .maskclip_hf.builder import build_maskclip
 
 
 special_text = {"ASSISTANT:": [319, 1799, 9047, 13566, 29901], "USER:": [11889, 29901]}
@@ -127,38 +122,28 @@ class DynamicLlavaMetaModel:
             )
 
     def get_maskclip(self):
-        maskclip_model = getattr(self, "maskclip_model", None)
-        maskclip_preprocess = getattr(self, "maskclip_preprocess", None)
-        full_negative_classes_names = getattr(self, "full_negative_classes_names", None)
-        with torch.no_grad():
-            negative_maskclip_text_embeddings = maskclip.generate_text_embeddings(
-                maskclip_model,
-                full_negative_classes_names,
-                templates=None,
-                device=self.device,
-            )
+        maskclip = getattr(self, "maskclip", None)
         llm_tokenizer = getattr(self, "llm_tokenizer", None)
         return (
-            maskclip_model,
-            maskclip_preprocess,
-            full_negative_classes_names,
-            negative_maskclip_text_embeddings,
+            maskclip,
             llm_tokenizer,
         )
 
-    def initialize_maskclip(self, sparse_args, tokenizer, device):
-        self.maskclip_model, self.maskclip_preprocess = maskclip.load(
-            sparse_args.maskclip,
-            templates=None,
-            device=device,
-        )
-        full_negative_classes = list(
-            set(stuff_classes() + all_pascal_context_classes() + bg_classes())
-        )
-        self.full_negative_classes_names = [
-            "This is a photo of the " + class_name
-            for class_name in full_negative_classes
-        ]
+    def initialize_maskclip(self, sparse_args, tokenizer, fsdp=None):
+        # self.maskclip_model, self.maskclip_preprocess = maskclip.load(
+        #     sparse_args.maskclip,
+        #     templates=None,
+        #     device=device,
+        # )
+        # full_negative_classes = list(
+        #     set(stuff_classes() + all_pascal_context_classes() + bg_classes())
+        # )
+        # self.full_negative_classes_names = [
+        #     "This is a photo of the " + class_name
+        #     for class_name in full_negative_classes
+        # ]
+        self.maskclip = build_maskclip(sparse_args.maskclip, sparse_args)
+        # self.maskclip.initialize_negative_text_embeds()
         self.llm_tokenizer = tokenizer
 
 
@@ -363,10 +348,7 @@ class DynamicLlavaMetaForCausalLM(ABC):
         # ----------------------------------------------------------#
         maskclip_mask = []
         (
-            maskclip_model,
-            maskclip_preprocess,
-            full_negative_classes_names,
-            negative_maskclip_text_embeddings,
+            maskclip,
             llm_tokenizer,
         ) = self.get_maskclip()
         # ----------------------------------------------------------#
@@ -523,77 +505,34 @@ class DynamicLlavaMetaForCausalLM(ABC):
                 cur_last_instruct_start_position = 0
             cur_last_instruct_end_position = special_assistant_starts[-1]
 
-            if maskclip_model is not None:
-                with torch.no_grad():
-                    cur_last_instruct_ids = cur_instruct_ids[
-                        cur_last_instruct_start_position:cur_last_instruct_end_position
-                    ]
+            if maskclip is not None:
+                maskclip.initialize_negative_text_embeds()
 
-                    postive_classes_names = [
-                        llm_tokenizer.decode(
-                            torch.cat([cur_last_instruct_ids, cur_answer_ids[:-1]])
-                        )
-                    ]
+                cur_last_instruct_ids = cur_instruct_ids[
+                    cur_last_instruct_start_position:cur_last_instruct_end_position
+                ]
 
-                    # # for max 77 token of clip tokenizer
-                    # postive_classes_names = postive_classes_names[:][
-                    #     : min(len(postive_classes_names[0]), 77)
-                    # ]
-
-                    # full_classes_names = [
-                    #     postive_classes_names
-                    # ] + full_negative_classes_names
-                    # maskclip_text_embeddings = maskclip.generate_text_embeddings(
-                    #     maskclip_model,
-                    #     full_classes_names,
-                    #     templates=None,
-                    #     device=self.device,
-                    # )
-
-                    postive_maskclip_text_embeddings = (
-                        maskclip.generate_text_embeddings(
-                            maskclip_model,
-                            postive_classes_names,
-                            templates=None,
-                            device=self.device,
-                            truncate=True,
-                        )
+                cur_postive_classes_names = [
+                    llm_tokenizer.decode(
+                        torch.cat([cur_last_instruct_ids, cur_answer_ids[:-1]])
                     )
-                    maskclip_text_embeddings = torch.cat(
-                        [
-                            postive_maskclip_text_embeddings,
-                            negative_maskclip_text_embeddings,
-                        ],
-                        dim=0,
-                    )
+                ]
 
-                    similarity = F.cosine_similarity(
-                        maskclip_text_embeddings[1:],
-                        maskclip_text_embeddings[:1].expand_as(
-                            maskclip_text_embeddings[1:]
-                        ),
-                        dim=1,
+                cur_maskclip_text_embeds = maskclip.get_full_text_embeds(
+                    cur_postive_classes_names
+                )
+                cur_image = images[cur_image_idx - 1 : cur_image_idx]
+                if self.config.sparse_config["maskclip_distill_token_rate"] is not None:
+                    k = int(
+                        cur_image_embeds.shape[0]
+                        * self.config.sparse_config["maskclip_distill_token_rate"]
                     )
-                    _, closest_indices = torch.topk(
-                        similarity,
-                        self.config.sparse_config["similar_postive_num"],
-                        largest=True,
-                    )
-                    closest_indices += 1
+                else:
+                    k = None
 
-                    temp_mask = torch.ones(
-                        maskclip_text_embeddings.size(0), dtype=torch.bool
-                    )
-                    temp_mask[closest_indices] = False
-                    filtered_text_embeddings = maskclip_text_embeddings[temp_mask]
-                    maskclip_model.initialize_text_embeddings(filtered_text_embeddings)
+                cur_maskclip_mask = maskclip(cur_maskclip_text_embeds, cur_image, k=k)
 
-                    cur_image = images[cur_image_idx - 1 : cur_image_idx]
-                    cur_maskclip_output = maskclip_model(cur_image)
-
-                    cur_maskclip_mask = cur_maskclip_output.argmax(dim=1)[0]
-                    cur_maskclip_mask = (cur_maskclip_mask == 0).int().view(-1)
-                    maskclip_mask.append(cur_maskclip_mask)
+                maskclip_mask.append(cur_maskclip_mask)
 
             # ----------------------------------------------------------#
 

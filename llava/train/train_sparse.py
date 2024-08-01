@@ -154,7 +154,7 @@ class SparseArguments:
     mask_loss_weight: float = 100.0
 
     maskclip: Optional[str] = field(default=None)
-    maskclip_distill_token_rate: float = 0.1
+    maskclip_distill_token_rate: float = 0.2
     maskclip_distill_loss_weight: float = 1.0
     similar_postive_num: int = 5
 
@@ -1147,9 +1147,9 @@ def train(attn_implementation=None):
 
     if sparse_args.maskclip is not None:
         model.get_model().initialize_maskclip(
-            sparse_args=sparse_args, tokenizer=tokenizer, device=training_args.device
+            sparse_args=sparse_args, tokenizer=tokenizer
         )
-        for p in model.get_model().maskclip_model.parameters():
+        for p in model.get_model().maskclip.parameters():
             p.requires_grad = False
 
     if training_args.bits in [4, 8]:

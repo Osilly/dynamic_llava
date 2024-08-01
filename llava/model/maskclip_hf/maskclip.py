@@ -16,6 +16,15 @@ from transformers.models.clip.modeling_clip import (
     ModelOutput,
 )
 
+from transformers import CLIPTokenizer, CLIPProcessor
+
+from .classes import (
+    stuff_classes,
+    all_pascal_context_classes,
+    bg_classes,
+)
+import torch.nn.functional as F
+
 
 @dataclass
 class MaskCLIPWithBaseModelOutput(ModelOutput):
@@ -609,3 +618,114 @@ class MaskCLIPModel(CLIPModel):
         logits_per_image = logits_per_image.permute(0, 2, 1)
 
         return logits_per_image
+
+
+class MaskCLIP(nn.Module):
+    def __init__(self, maskclip, args, delay_load=False):
+        super().__init__()
+        self.is_loaded = False
+        self.is_initialized_negative_text_embeds = False
+
+        self.maskclip_name = maskclip
+        self.args = args
+
+        if not delay_load:
+            self.load_model()
+        else:
+            self.cfg_only = CLIPVisionConfig.from_pretrained(self.maskclip_name)
+
+    def load_model(self, device_map=None):
+        if self.is_loaded:
+            print(
+                "{} is already loaded, `load_model` called again, skipping.".format(
+                    self.maskclip_name
+                )
+            )
+            return
+
+        self.maskclip_processor = CLIPProcessor.from_pretrained(self.maskclip_name)
+        self.maskclip_tokenizer = CLIPTokenizer.from_pretrained(self.maskclip_name)
+        self.maskclip = MaskCLIPModel.from_pretrained(
+            self.maskclip_name, device_map=device_map
+        )
+        self.maskclip.requires_grad_(False)
+
+        self.is_loaded = True
+
+    @torch.no_grad()
+    def initialize_negative_text_embeds(self):
+        # if self.is_initialized_negative_text_embeds:
+        #     print(
+        #         "negative_text_embeds is already loaded, `load_model` called again, skipping."
+        #     )
+        #     return
+
+        negative_classes = list(
+            set(stuff_classes() + all_pascal_context_classes() + bg_classes())
+        )
+        negative_classes_names = [
+            "This is a photo of the " + class_name for class_name in negative_classes
+        ]
+        inputs = self.maskclip_tokenizer(
+            negative_classes_names,
+            padding=True,
+            return_tensors="pt",
+        ).to(self.maskclip.device)
+        self.negative_text_embeds = self.maskclip.get_text_features(**inputs)
+
+        self.is_initialized_negative_text_embeds = True
+
+    @torch.no_grad()
+    def get_full_text_embeds(self, text):
+        inputs = self.maskclip_tokenizer(
+            text,
+            return_tensors="pt",
+            max_length=77,
+            truncation=True,
+        ).to(self.maskclip.device)
+        postive_text_embeds = self.maskclip.get_text_features(**inputs)
+        self.negative_text_embeds = self.negative_text_embeds.to(self.maskclip.device)
+        full_text_embeds = torch.cat(
+            [postive_text_embeds, self.negative_text_embeds], dim=0
+        )
+
+        similarity = F.cosine_similarity(
+            full_text_embeds[1:],
+            full_text_embeds[:1].expand_as(full_text_embeds[1:]),
+            dim=1,
+        )
+        _, closest_indices = torch.topk(
+            similarity, self.args.similar_postive_num, largest=True
+        )
+        closest_indices += 1
+        mask = torch.ones(full_text_embeds.size(0), dtype=torch.bool)
+        mask[closest_indices] = False
+        filtered_text_embeds = full_text_embeds[mask]
+        return filtered_text_embeds
+
+    def get_processed_image(self, image):
+        return self.maskclip_processor(
+            images=image,
+            return_tensors="pt",
+        )
+
+    @torch.no_grad()
+    def get_topk_mask(self, text_embeds, pixel_values, k):
+        output = self.maskclip(text_embeds, pixel_values)
+        B, C, Nt = output.shape
+        softmax_output = F.softmax(output, dim=1)
+        class_0_data = softmax_output[:, 0, :].squeeze()
+        top_k_values, _ = torch.topk(class_0_data.view(-1), k)
+        threshold = top_k_values.min()
+        mask = (class_0_data >= threshold).int()
+        return mask
+
+    @torch.no_grad()
+    def get_full_mask(self, text_embeds, pixel_values):
+        pass
+
+    def forward(self, text_embeds, pixel_values, k=None):
+        if k is not None:
+            return self.get_topk_mask(text_embeds, pixel_values, k)
+        else:
+            return self.get_full_mask(text_embeds, pixel_values)
