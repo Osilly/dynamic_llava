@@ -158,6 +158,31 @@ def binary_xloss(logits, labels, ignore=None):
 # --------------------------- MULTICLASS LOSSES ---------------------------
 
 
+def lovasz_softmax_1d(probas, labels, classes="present", per_image=False, ignore=None):
+    """
+    Multi-class Lovasz-Softmax loss
+      probas: [B, C, N] Variable, class probabilities at each prediction (between 0 and 1).
+              Interpreted as binary (sigmoid) output with outputs of size [B, N].
+      labels: [B, N] Tensor, ground truth labels (between 0 and C - 1)
+      classes: 'all' for all, 'present' for classes present in labels, or a list of classes to average.
+      per_image: compute the loss per image instead of per batch
+      ignore: void class labels
+    """
+    if per_image:
+        loss = mean(
+            lovasz_softmax_flat(
+                *flatten_probas_1d(prob.unsqueeze(0), lab.unsqueeze(0), ignore),
+                classes=classes,
+            )
+            for prob, lab in zip(probas, labels)
+        )
+    else:
+        loss = lovasz_softmax_flat(
+            *flatten_probas_1d(probas, labels, ignore), classes=classes
+        )
+    return loss
+
+
 def lovasz_softmax(probas, labels, classes="present", per_image=False, ignore=None):
     """
     Multi-class Lovasz-Softmax loss
@@ -198,7 +223,7 @@ def lovasz_softmax_flat(probas, labels, classes="present"):
     class_to_sum = list(range(C)) if classes in ["all", "present"] else classes
     for c in class_to_sum:
         fg = (labels == c).float()  # foreground for class c
-        if classes is "present" and fg.sum() == 0:
+        if classes == "present" and fg.sum() == 0:
             continue
         if C == 1:
             if len(classes) > 1:
@@ -212,6 +237,25 @@ def lovasz_softmax_flat(probas, labels, classes="present"):
         fg_sorted = fg[perm]
         losses.append(torch.dot(errors_sorted, Variable(lovasz_grad(fg_sorted))))
     return mean(losses)
+
+
+def flatten_probas_1d(probas, labels, ignore=None):
+    """
+    Flattens predictions in the batch
+    """
+    if probas.dim() == 2:
+        # assumes output of a sigmoid layer
+        B, N = probas.size()
+        probas = probas.view(B, 1, N)
+    B, C, N = probas.size()
+    probas = probas.permute(0, 2, 1).contiguous().view(-1, C)  # B * N, C = P, C
+    labels = labels.view(-1)
+    if ignore is None:
+        return probas, labels
+    valid = labels != ignore
+    vprobas = probas[valid.nonzero().squeeze()]
+    vlabels = labels[valid]
+    return vprobas, vlabels
 
 
 def flatten_probas(probas, labels, ignore=None):
@@ -264,8 +308,3 @@ def mean(l, ignore_nan=False, empty=0):
     if n == 1:
         return acc
     return acc / n
-
-
-a = torch.tensor([[1.0, 1.0, 0.0, 0.0]])
-b = torch.tensor([[1.0, 1.0, 0.0, 1.0]])
-print(lovasz_hinge(a, b))

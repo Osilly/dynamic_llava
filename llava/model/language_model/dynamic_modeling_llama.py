@@ -1312,76 +1312,8 @@ class VisionPredictor(nn.Module):
             nn.Linear(self.d_model // 2, self.d_model // 4),
             nn.GELU(),
             nn.Linear(self.d_model // 4, 2),
-            nn.LogSoftmax(dim=-1),
+            # nn.LogSoftmax(dim=-1),
         )
-
-    # def forward(self, x, input_embeds_indices, image_policy) -> torch.FloatTensor:
-    #     predict = []
-    #     input_x = []
-    #     image_len = (
-    #         input_embeds_indices[0]["image"][1] - input_embeds_indices[0]["image"][0]
-    #     )
-    #     for index in range(x.shape[0]):
-    #         cur_input_embeds_indices = input_embeds_indices[index]
-    #         cur_x = torch.cat(
-    #             [
-    #                 x[
-    #                     index,
-    #                     cur_input_embeds_indices["image"][0] : cur_input_embeds_indices[
-    #                         "image"
-    #                     ][1],
-    #                     :,
-    #                 ],
-    #                 x[
-    #                     index,
-    #                     cur_input_embeds_indices["instruct"][
-    #                         0
-    #                     ] : cur_input_embeds_indices["instruct"][1],
-    #                     :,
-    #                 ],
-    #             ],
-    #             dim=0,
-    #         )
-    #         input_x.append(cur_x)
-
-    #     new_input = []
-    #     max_len = max(cur_input.shape[0] for cur_input in input_x)
-    #     for cur_input in input_x:
-    #         cur_len = cur_input.shape[0]
-    #         new_input.append(
-    #             torch.cat(
-    #                 [
-    #                     cur_input,
-    #                     torch.zeros(
-    #                         (max_len - cur_len, cur_input.shape[1]),
-    #                         dtype=cur_input.dtype,
-    #                         device=cur_input.device,
-    #                     ),
-    #                 ],
-    #                 dim=0,
-    #             )
-    #         )
-
-    #     new_x = torch.stack(new_input, dim=0)
-    #     new_x = self.down_mlp(new_x)
-    #     new_x = self.transformer(new_x)
-
-    #     new_image_x = new_x[
-    #         :,
-    #         0:image_len,
-    #         :,
-    #     ]
-
-    #     B, N, C = new_image_x.size()
-    #     local_image_x = new_image_x[:, :, : C // 2]
-    #     global_image_x = (new_image_x[:, :, C // 2 :] * image_policy).sum(
-    #         dim=1, keepdim=True
-    #     ) / torch.sum(image_policy, dim=1, keepdim=True)
-    #     new_image_x = torch.cat(
-    #         [local_image_x, global_image_x.expand(B, N, C // 2)], dim=-1
-    #     )
-    #     predict = self.output_mlp(new_image_x)
-    #     return predict
 
     def forward(self, x, input_embeds_indices, image_policy) -> torch.FloatTensor:
         predict = []
@@ -1545,7 +1477,7 @@ class DynamicModelOutputWithPast(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     masks: Optional[List[torch.FloatTensor]] = None
-    distill_masks: Optional[List[torch.FloatTensor]] = None
+    image_score_predictor_logits: Optional[List[torch.FloatTensor]] = None
 
 
 LLAMA_START_DOCSTRING = r"""
@@ -1820,7 +1752,7 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
         init_n = hidden_states.shape[1]
         policy = None
         masks = []
-        distill_masks = []
+        image_score_predictor_logits = []
         if input_embeds_indices is not None and hidden_states.shape[0] == len(
             input_embeds_indices
         ):
@@ -1854,9 +1786,10 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                 and input_embeds_indices is not None
                 and hidden_states.shape[0] == len(input_embeds_indices)
             ):
-                pred_score = self.image_score_predictor(
+                image_score_predictor_logit = self.image_score_predictor(
                     hidden_states, input_embeds_indices, image_prev_decision
                 ).reshape(B, -1, 2)
+                pred_score = F.log_softmax(image_score_predictor_logit, dim=-1)
                 if self.training:
                     hard_keep_decision = (
                         F.gumbel_softmax(pred_score, tau=self.gumbel_tau, hard=True)[
@@ -1885,15 +1818,8 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     )
                     image_prev_decision = hard_keep_decision
 
-                    # # for maskclip distill loss
-                    # if self.sparse_config["maskclip"] is not None:
-                    #     score = pred_score[:, :, 0]
-                    #     num_keep_node = int(
-                    #         init_image_n
-                    #         * self.sparse_config["maskclip_distill_token_rate"]
-                    #     )
-                    #     distill_hard_keep_decision = ste_topk(score, num_keep_node)
-                    #     distill_masks.append(distill_hard_keep_decision)
+                    if self.sparse_config["maskclip"] is not None:
+                        image_score_predictor_logits.append(image_score_predictor_logit)
                 else:
                     score = pred_score[:, :, 0]
                     num_keep_node = int(
@@ -2047,7 +1973,7 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
             masks=masks,
-            distill_masks=distill_masks,
+            image_score_predictor_logits=image_score_predictor_logits,
         )
 
 
@@ -2214,25 +2140,34 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
             # ----------------------------------------------------------#
             if maskclip_mask is not None and len(maskclip_mask):
                 maskclip_distill_loss = 0.0
-                for mask in outputs.masks:
-                    # lovasz loss
+                for image_score_predictor_logit in outputs.image_score_predictor_logits:
+                    # # l1loss
                     # maskclip_distill_loss = maskclip_distill_loss + F.l1_loss(
                     #     mask, maskclip_mask
                     # )
 
-                    # lovasz loss
-                    # from .lovasz_loss import lovasz_hinge
-                    # maskclip_distill_loss = maskclip_distill_loss + lovasz_hinge(
-                    #     mask, maskclip_mask, per_image=True
-                    # )
-
-                    # bce loss
-                    maskclip_distill_loss = (
-                        maskclip_distill_loss
-                        + F.binary_cross_entropy_with_logits(
-                            (mask - 0.5) * 10, maskclip_mask.float()
-                        )
+                    # ce loss
+                    maskclip_distill_loss = maskclip_distill_loss + F.cross_entropy(
+                        image_score_predictor_logit.permute(0, 2, 1),
+                        (1 - maskclip_mask).long(),
                     )
+
+                    # lovasz loss
+                    from .lovasz_loss import lovasz_softmax_1d
+
+                    maskclip_distill_loss = maskclip_distill_loss + lovasz_softmax_1d(
+                        image_score_predictor_logit.permute(0, 2, 1),
+                        (1 - maskclip_mask).long(),
+                        per_image=True,
+                    )
+
+                    # # bce loss
+                    # maskclip_distill_loss = (
+                    #     maskclip_distill_loss
+                    #     + F.binary_cross_entropy_with_logits(
+                    #         (mask - 0.5) * 10, maskclip_mask.float()
+                    #     )
+                    # )
                 loss = (
                     loss
                     + self.config.sparse_config["maskclip_distill_loss_weight"]
