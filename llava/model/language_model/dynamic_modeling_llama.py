@@ -2140,34 +2140,35 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
             # ----------------------------------------------------------#
             if maskclip_mask is not None and len(maskclip_mask):
                 maskclip_distill_loss = 0.0
-                for image_score_predictor_logit in outputs.image_score_predictor_logits:
+                for mask in outputs.masks:
                     # # l1loss
                     # maskclip_distill_loss = maskclip_distill_loss + F.l1_loss(
                     #     mask, maskclip_mask
                     # )
 
-                    # ce loss
-                    maskclip_distill_loss = maskclip_distill_loss + F.cross_entropy(
-                        image_score_predictor_logit.permute(0, 2, 1),
-                        (1 - maskclip_mask).long(),
-                    )
-
-                    # lovasz loss
-                    from .lovasz_loss import lovasz_softmax_1d
-
-                    maskclip_distill_loss = maskclip_distill_loss + lovasz_softmax_1d(
-                        image_score_predictor_logit.permute(0, 2, 1),
-                        (1 - maskclip_mask).long(),
-                        per_image=True,
-                    )
-
-                    # # bce loss
-                    # maskclip_distill_loss = (
-                    #     maskclip_distill_loss
-                    #     + F.binary_cross_entropy_with_logits(
-                    #         (mask - 0.5) * 10, maskclip_mask.float()
-                    #     )
+                    # # ce loss
+                    # maskclip_distill_loss = maskclip_distill_loss + F.cross_entropy(
+                    #     image_score_predictor_logit.permute(0, 2, 1),
+                    #     (1 - maskclip_mask).long(),
                     # )
+
+                    # # lovasz loss
+                    # from .lovasz_loss import lovasz_softmax_1d
+
+                    # maskclip_distill_loss = maskclip_distill_loss + lovasz_softmax_1d(
+                    #     image_score_predictor_logit.permute(0, 2, 1),
+                    #     (1 - maskclip_mask).long(),
+                    #     per_image=True,
+                    # )
+
+                    # bce loss
+                    maskclip_distill_loss = (
+                        maskclip_distill_loss
+                        + F.binary_cross_entropy_with_logits(
+                            (mask - 0.5) * 10,
+                            maskclip_mask.float(),
+                        )
+                    )
                 loss = (
                     loss
                     + self.config.sparse_config["maskclip_distill_loss_weight"]
