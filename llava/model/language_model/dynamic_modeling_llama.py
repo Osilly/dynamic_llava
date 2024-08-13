@@ -1786,6 +1786,7 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                 and input_embeds_indices is not None
                 and hidden_states.shape[0] == len(input_embeds_indices)
             ):
+                torch.autograd.set_detect_anomaly(True)
                 image_score_predictor_logit = self.image_score_predictor(
                     hidden_states, input_embeds_indices, image_prev_decision
                 ).reshape(B, -1, 2)
@@ -1817,6 +1818,120 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                         [left_policy, hard_keep_decision, right_policy], dim=1
                     )
                     image_prev_decision = hard_keep_decision
+
+                    # token merging
+                    with torch.no_grad():
+                        keep_index_batch_list = [
+                            torch.nonzero(
+                                hard_keep_decision[b, :, 0] == 1, as_tuple=False
+                            )
+                            for b in range(B)
+                        ]
+                        unkeep_index_batch_list = [
+                            torch.nonzero(
+                                hard_keep_decision[b, :, 0] == 0, as_tuple=False
+                            )
+                            for b in range(B)
+                        ]
+
+                    image_hidden_states = hidden_states[
+                        :,
+                        input_embeds_indices[0]["image"][0] : input_embeds_indices[0][
+                            "image"
+                        ][1],
+                        :,
+                    ]
+                    keep_image_hidden_states_batch_list = [
+                        image_hidden_states[b]
+                        .clone()
+                        .gather(
+                            dim=0,
+                            index=keep_index_batch_list[b].expand(
+                                -1,
+                                image_hidden_states.shape[2],
+                            ),
+                        )
+                        for b in range(B)
+                    ]
+                    unkeep_image_hidden_states_batch_list = [
+                        image_hidden_states[b]
+                        .clone()
+                        .gather(
+                            dim=0,
+                            index=unkeep_index_batch_list[b].expand(
+                                -1,
+                                image_hidden_states.shape[2],
+                            ),
+                        )
+                        for b in range(B)
+                    ]
+                    with torch.no_grad():
+                        keep_image_hidden_states_norm_batch_list = [
+                            (
+                                keep_image_hidden_states_batch_list[b]
+                                / keep_image_hidden_states_batch_list[b].norm(
+                                    dim=-1, keepdim=True
+                                )
+                            )
+                            for b in range(B)
+                        ]
+                        unkeep_image_hidden_states_norm_batch_list = [
+                            (
+                                unkeep_image_hidden_states_batch_list[b]
+                                / unkeep_image_hidden_states_batch_list[b].norm(
+                                    dim=-1, keepdim=True
+                                )
+                            )
+                            for b in range(B)
+                        ]
+                        scores_batch_list = [
+                            (
+                                unkeep_image_hidden_states_norm_batch_list[b]
+                                @ keep_image_hidden_states_norm_batch_list[b].transpose(
+                                    -1, -2
+                                )
+                            )
+                            for b in range(B)
+                        ]
+                        node_idx_batch_list = [
+                            scores_batch_list[b].max(dim=-1)[1] for b in range(B)
+                        ]
+                        merge_unselect_node_index_batch_list = [
+                            node_idx_batch_list[b][..., None] for b in range(B)
+                        ]
+
+                    for b in range(B):
+                        keep_state = keep_image_hidden_states_batch_list[b]
+
+                        unkeep_state = unkeep_image_hidden_states_batch_list[b]
+                        indices = merge_unselect_node_index_batch_list[
+                            b
+                        ].squeeze()  # 移除多余的维度
+
+                        # 创建一个结果张量，初始化为0
+                        result_tensor = torch.zeros_like(keep_state)
+
+                        # 对于每个索引，聚合并计算平均
+                        unique_indices, counts = indices.unique(return_counts=True)
+                        for idx, count in zip(unique_indices, counts):
+                            # 获取所有匹配当前索引的位置
+                            mask = indices == idx
+                            # 聚合这些位置的向量
+                            result_tensor[idx] = unkeep_state[mask].sum(0) / count
+
+                        keep_state = keep_state + result_tensor
+                        # reverse to original hidden states
+                        image_hidden_states[b] = (
+                            image_hidden_states[b]
+                            .clone()
+                            .scatter(
+                                dim=0,
+                                index=keep_index_batch_list[b].expand(
+                                    -1, keep_state.shape[-1]
+                                ),
+                                src=keep_state,
+                            )
+                        )
 
                     if self.sparse_config["maskclip"] is not None:
                         image_score_predictor_logits.append(image_score_predictor_logit)
@@ -1864,14 +1979,58 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                             image_hidden_states.shape[2],
                         ),
                     )
-                    # unimage_hidden_states = image_hidden_states.gather(
-                    #     dim=1,
-                    #     index=unkeep_index[..., None].expand(
-                    #         image_hidden_states.shape[0],
-                    #         init_image_n - num_keep_node,
-                    #         image_hidden_states.shape[2],
-                    #     ),
-                    # )
+                    unkeep_image_hidden_states = image_hidden_states.gather(
+                        dim=1,
+                        index=unkeep_index[..., None].expand(
+                            image_hidden_states.shape[0],
+                            init_image_n - num_keep_node,
+                            image_hidden_states.shape[2],
+                        ),
+                    )
+                    # token merging
+                    with torch.no_grad():
+                        keep_image_hidden_states_norm = (
+                            keep_image_hidden_states
+                            / keep_image_hidden_states.norm(dim=-1, keepdim=True)
+                        )
+                        unkeep_image_hidden_states_norm = (
+                            unkeep_image_hidden_states
+                            / unkeep_image_hidden_states.norm(dim=-1, keepdim=True)
+                        )
+                        scores = (
+                            unkeep_image_hidden_states_norm
+                            @ keep_image_hidden_states_norm.transpose(-1, -2)
+                        )
+                        node_max, node_idx = scores.max(dim=-1)
+                        merge_unselect_node_index = node_idx[..., None]
+
+                    for b in range(B):
+                        keep_state = keep_image_hidden_states[b]
+
+                        unkeep_state = unkeep_image_hidden_states[b]
+                        indices = merge_unselect_node_index[
+                            b
+                        ].squeeze()  # 移除多余的维度
+
+                        # 创建一个结果张量，初始化为0
+                        result_tensor = torch.zeros_like(keep_state)
+
+                        # 对于每个索引，聚合并计算平均
+                        unique_indices, counts = indices.unique(return_counts=True)
+                        for idx, count in zip(unique_indices, counts):
+                            # 获取所有匹配当前索引的位置
+                            mask = indices == idx
+                            # 聚合这些位置的向量
+                            result_tensor[idx] = unkeep_state[mask].sum(0) / count
+
+                        keep_state = keep_state + result_tensor
+                        # reverse to original hidden states
+                        image_hidden_states[b] = image_hidden_states[b].scatter(
+                            dim=0,
+                            index=keep_index[b].expand(-1, keep_state.shape[-1]),
+                            src=keep_state,
+                        )
+
                     hidden_states = torch.cat(
                         [
                             left_hidden_states,
