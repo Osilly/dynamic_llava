@@ -67,16 +67,21 @@ class CustomDataset(Dataset):
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
-        image = Image.open(os.path.join(self.image_folder, image_file)).convert("RGB")
-        image_tensor = process_images([image], self.image_processor, self.model_config)[
-            0
-        ]
-
         input_ids = tokenizer_image_token(
             prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt"
         )
+        try:
+            image = Image.open(os.path.join(self.image_folder, image_file)).convert(
+                "RGB"
+            )
+            image_tensor = process_images(
+                [image], self.image_processor, self.model_config
+            )[0]
 
-        return input_ids, image_tensor, image.size
+            return input_ids, image_tensor, image.size
+        except:
+            print("No image, continue!")
+            return input_ids, torch.zeros([3, 336, 336]), (336, 336)
 
     def __len__(self):
         return len(self.questions)
