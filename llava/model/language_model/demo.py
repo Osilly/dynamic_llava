@@ -33,45 +33,50 @@
 # #     print(f"Batch {b}: {idx}")
 
 
-import torch
+# import torch
 
-# 假设有以下数据
-B = 2  # 批次数量
-N = 5  # 每个批次中的节点数量
-C = 3  # 特征数量
+# # 假设有以下数据
+# B = 2  # 批次数量
+# N = 5  # 每个批次中的节点数量
+# C = 3  # 特征数量
 
-# 模拟数据
-merge_unselect_node_index_batch_list = [
-    torch.tensor([[3], [1], [1], [3], [2]]),
-    torch.tensor([[0], [0], [1], [2], [4]]),
-]
+# # 模拟数据
+# merge_unselect_node_index_batch_list = [
+#     torch.tensor([[3], [1], [1], [3], [2]]),
+#     torch.tensor([[0], [0], [1], [2], [4]]),
+# ]
 
-unkeep_image_hidden_states_batch_list = [
-    torch.rand(N, C),
-    torch.rand(N, C),
-]
+# unkeep_image_hidden_states_batch_list = [
+#     torch.rand(N, C),
+#     torch.rand(N, C),
+# ]
 
-# 处理每个批次
-result_list = []
-for batch_idx in range(B):
-    unkeep_states = unkeep_image_hidden_states_batch_list[batch_idx]
-    indices = merge_unselect_node_index_batch_list[
-        batch_idx
-    ].squeeze()  # 移除多余的维度
+# # 处理每个批次
+# result_list = []
+# for batch_idx in range(B):
+#     unkeep_states = unkeep_image_hidden_states_batch_list[batch_idx]
+#     indices = merge_unselect_node_index_batch_list[
+#         batch_idx
+#     ].squeeze()  # 移除多余的维度
 
-    # 创建一个结果张量，初始化为0
-    result_tensor = torch.zeros_like(unkeep_states)
+#     # 创建一个结果张量，初始化为0
+#     result_tensor = torch.zeros_like(unkeep_states)
 
-    # 对于每个索引，聚合并计算平均
-    unique_indices, counts = indices.unique(return_counts=True)
-    for idx, count in zip(unique_indices, counts):
-        # 获取所有匹配当前索引的位置
-        mask = indices == idx
-        # 聚合这些位置的向量
-        result_tensor[idx] = unkeep_states[mask].sum(0) / count
+#     # 对于每个索引，聚合并计算平均
+#     unique_indices, counts = indices.unique(return_counts=True)
+#     for idx, count in zip(unique_indices, counts):
+#         # 获取所有匹配当前索引的位置
+#         mask = indices == idx
+#         # 聚合这些位置的向量
+#         result_tensor[idx] = unkeep_states[mask].sum(0) / count
 
-    result_list.append(result_tensor)
+#     result_list.append(result_tensor)
 
-# 输出结果张量
-for i, result in enumerate(result_list):
-    print(f"Batch {i} Result:\n{result}")
+# # 输出结果张量
+# for i, result in enumerate(result_list):
+#     print(f"Batch {i} Result:\n{result}")
+
+a = [1, 2]
+b = a
+b[0] = 3
+print(a)

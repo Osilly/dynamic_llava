@@ -1901,25 +1901,41 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                         ]
 
                     for b in range(B):
-                        keep_state = keep_image_hidden_states_batch_list[b]
+                        cur_keep_image_hidden_states = (
+                            keep_image_hidden_states_batch_list[b]
+                        )
+                        cur_unkeep_image_hidden_states = (
+                            unkeep_image_hidden_states_batch_list[b]
+                        )
+                        cur_merge_unselect_node_index = (
+                            merge_unselect_node_index_batch_list[b]
+                        )
 
-                        unkeep_state = unkeep_image_hidden_states_batch_list[b]
-                        indices = merge_unselect_node_index_batch_list[
-                            b
-                        ].squeeze()  # 移除多余的维度
-
-                        # 创建一个结果张量，初始化为0
-                        result_tensor = torch.zeros_like(keep_state)
-
-                        # 对于每个索引，聚合并计算平均
-                        unique_indices, counts = indices.unique(return_counts=True)
-                        for idx, count in zip(unique_indices, counts):
-                            # 获取所有匹配当前索引的位置
-                            mask = indices == idx
-                            # 聚合这些位置的向量
-                            result_tensor[idx] = unkeep_state[mask].sum(0) / count
-
-                        keep_state = keep_state + result_tensor
+                        temp = torch.zeros_like(cur_keep_image_hidden_states)
+                        size = torch.ones_like(cur_unkeep_image_hidden_states)
+                        size = temp.scatter_add(
+                            dim=0,
+                            index=cur_merge_unselect_node_index.expand(
+                                -1,
+                                cur_unkeep_image_hidden_states.shape[-1],
+                            ),
+                            src=size,
+                        )
+                        cur_merge_unkeep_image_hidden_states = temp.scatter_add(
+                            dim=0,
+                            index=cur_merge_unselect_node_index.expand(
+                                -1,
+                                cur_unkeep_image_hidden_states.shape[-1],
+                            ),
+                            src=cur_unkeep_image_hidden_states,
+                        )
+                        cur_reduced_merge_unkeep_image_hidden_states = (
+                            cur_merge_unkeep_image_hidden_states / size.clamp(min=1)
+                        )
+                        cur_keep_image_hidden_states = (
+                            cur_keep_image_hidden_states
+                            + cur_reduced_merge_unkeep_image_hidden_states
+                        )
                         # reverse to original hidden states
                         image_hidden_states[b] = (
                             image_hidden_states[b]
@@ -1927,11 +1943,43 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                             .scatter(
                                 dim=0,
                                 index=keep_index_batch_list[b].expand(
-                                    -1, keep_state.shape[-1]
+                                    -1, cur_keep_image_hidden_states.shape[-1]
                                 ),
-                                src=keep_state,
+                                src=cur_keep_image_hidden_states,
                             )
                         )
+
+                        # keep_state = keep_image_hidden_states_batch_list[b]
+
+                        # unkeep_state = unkeep_image_hidden_states_batch_list[b]
+                        # indices = merge_unselect_node_index_batch_list[
+                        #     b
+                        # ].squeeze()  # 移除多余的维度
+
+                        # # 创建一个结果张量，初始化为0
+                        # result_tensor = torch.zeros_like(keep_state)
+
+                        # # 对于每个索引，聚合并计算平均
+                        # unique_indices, counts = indices.unique(return_counts=True)
+                        # for idx, count in zip(unique_indices, counts):
+                        #     # 获取所有匹配当前索引的位置
+                        #     mask = indices == idx
+                        #     # 聚合这些位置的向量
+                        #     result_tensor[idx] = unkeep_state[mask].sum(0) / count
+
+                        # keep_state = keep_state + result_tensor
+                        # # reverse to original hidden states
+                        # image_hidden_states[b] = (
+                        #     image_hidden_states[b]
+                        #     .clone()
+                        #     .scatter(
+                        #         dim=0,
+                        #         index=keep_index_batch_list[b].expand(
+                        #             -1, keep_state.shape[-1]
+                        #         ),
+                        #         src=keep_state,
+                        #     )
+                        # )
 
                     if self.sparse_config["maskclip"] is not None:
                         image_score_predictor_logits.append(image_score_predictor_logit)
@@ -2004,32 +2052,60 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                         node_max, node_idx = scores.max(dim=-1)
                         merge_unselect_node_index = node_idx[..., None]
 
-                    for b in range(B):
-                        keep_state = keep_image_hidden_states[b]
+                    temps = torch.zeros_like(keep_image_hidden_states)
+                    sizes = torch.ones_like(unkeep_image_hidden_states)
+                    sizes = temps.scatter_add(
+                        dim=1,
+                        index=merge_unselect_node_index.expand(
+                            -1,
+                            -1,
+                            unkeep_image_hidden_states.shape[2],
+                        ),
+                        src=sizes,
+                    )
+                    merge_unkeep_image_hidden_states = temps.scatter_add(
+                        dim=1,
+                        index=merge_unselect_node_index.expand(
+                            -1,
+                            -1,
+                            unkeep_image_hidden_states.shape[2],
+                        ),
+                        src=unkeep_image_hidden_states,
+                    )
+                    reduced_merge_unkeep_image_hidden_states = (
+                        merge_unkeep_image_hidden_states / sizes.clamp(min=1)
+                    )
+                    keep_image_hidden_states = (
+                        keep_image_hidden_states
+                        + reduced_merge_unkeep_image_hidden_states
+                    )
 
-                        unkeep_state = unkeep_image_hidden_states[b]
-                        indices = merge_unselect_node_index[
-                            b
-                        ].squeeze()  # 移除多余的维度
+                    # for b in range(B):
+                    #     keep_state = keep_image_hidden_states[b]
 
-                        # 创建一个结果张量，初始化为0
-                        result_tensor = torch.zeros_like(keep_state)
+                    #     unkeep_state = unkeep_image_hidden_states[b]
+                    #     indices = merge_unselect_node_index[
+                    #         b
+                    #     ].squeeze()  # 移除多余的维度
 
-                        # 对于每个索引，聚合并计算平均
-                        unique_indices, counts = indices.unique(return_counts=True)
-                        for idx, count in zip(unique_indices, counts):
-                            # 获取所有匹配当前索引的位置
-                            mask = indices == idx
-                            # 聚合这些位置的向量
-                            result_tensor[idx] = unkeep_state[mask].sum(0) / count
+                    #     # 创建一个结果张量，初始化为0
+                    #     result_tensor = torch.zeros_like(keep_state)
 
-                        keep_state = keep_state + result_tensor
-                        # reverse to original hidden states
-                        image_hidden_states[b] = image_hidden_states[b].scatter(
-                            dim=0,
-                            index=keep_index[b].expand(-1, keep_state.shape[-1]),
-                            src=keep_state,
-                        )
+                    #     # 对于每个索引，聚合并计算平均
+                    #     unique_indices, counts = indices.unique(return_counts=True)
+                    #     for idx, count in zip(unique_indices, counts):
+                    #         # 获取所有匹配当前索引的位置
+                    #         mask = indices == idx
+                    #         # 聚合这些位置的向量
+                    #         result_tensor[idx] = unkeep_state[mask].sum(0) / count
+
+                    #     keep_state = keep_state + result_tensor
+                    #     # reverse to original hidden states
+                    #     image_hidden_states[b] = image_hidden_states[b].scatter(
+                    #         dim=0,
+                    #         index=keep_index[b].expand(-1, keep_state.shape[-1]),
+                    #         src=keep_state,
+                    #     )
 
                     hidden_states = torch.cat(
                         [
