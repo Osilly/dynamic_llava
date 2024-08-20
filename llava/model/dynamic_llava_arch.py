@@ -358,6 +358,34 @@ class DynamicLlavaMetaForCausalLM(ABC):
             cur_labels = labels[batch_idx]
 
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+
+            # # for parallel training
+            # if num_images == 0:
+            #     image_features[cur_image_idx] = torch.zeros_like(
+            #         image_features[cur_image_idx]
+            #     )
+            #     cur_input_ids = torch.cat(
+            #         [
+            #             cur_input_ids[:34],
+            #             torch.tensor([29871, IMAGE_TOKEN_INDEX, 29871]).to(
+            #                 device=cur_input_ids.device, dtype=cur_input_ids.dtype
+            #             ),
+            #             cur_input_ids[34:],
+            #         ],
+            #         dim=0,
+            #     )
+            #     cur_labels = torch.cat(
+            #         [
+            #             cur_labels[:34],
+            #             torch.tensor([IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX]).to(
+            #                 device=cur_labels.device, dtype=cur_labels.dtype
+            #             ),
+            #             cur_labels[34:],
+            #         ],
+            #         dim=0,
+            #     )
+            #     num_images = 1
+
             if num_images == 0:
                 cur_image_features = image_features[cur_image_idx]
                 cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
@@ -368,6 +396,7 @@ class DynamicLlavaMetaForCausalLM(ABC):
                 new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
                 continue
+
             # if num_images == 0:
             #     cur_image_idx += 1
             #     continue

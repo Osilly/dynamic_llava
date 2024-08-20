@@ -259,6 +259,19 @@ class CustomCallback(TrainerCallback):
         #     forward_hook_function
         # )
 
+    def on_step_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        """
+        Event called at the end of a training step. If using gradient accumulation, one training step might take
+        several inputs.
+        """
+        pass
+
     def on_substep_end(
         self,
         args: TrainingArguments,
@@ -501,17 +514,17 @@ class DynamicLLaVATrainer(Trainer):
 
             with torch.no_grad():
                 # mask loss
-                masks = (
+                image_masks = (
                     self.callback_handler.__dict__["callbacks"][-1]
                     .forward_data["outputs"]
-                    .masks
+                    .image_masks
                 )
-                if masks is not None and len(masks):
-                    mask_loss = 0.0
-                    for mask in masks:
+                if image_masks is not None and len(image_masks):
+                    image_masks_loss = 0.0
+                    for mask in image_masks:
                         batch_ratio = mask.mean(dim=1)
-                        mask_loss = (
-                            mask_loss
+                        image_masks_loss = (
+                            image_masks_loss
                             + (
                                 (
                                     self.model.config.sparse_config["vision_keep_rate"]
@@ -520,15 +533,42 @@ class DynamicLLaVATrainer(Trainer):
                                 ** 2
                             ).mean()
                         ).item()
-                    mask_loss = (
-                        self.model.config.sparse_config["mask_loss_weight"] * mask_loss
+                    image_masks_loss = (
+                        self.model.config.sparse_config["mask_loss_weight"]
+                        * image_masks_loss
                     )
-                    logs["mask_loss"] = round(mask_loss, 4)
+                    logs["image_masks_loss"] = round(image_masks_loss, 4)
 
-                    # # maskclip loss
-                    # maskclip_mask = self.callback_handler.__dict__["callbacks"][
-                    #     -1
-                    # ].forward_data_1
+                output_text_masks_batch_list = (
+                    self.callback_handler.__dict__["callbacks"][-1]
+                    .forward_data["outputs"]
+                    .output_text_masks_batch_list
+                )
+                if output_text_masks_batch_list is not None and len(
+                    output_text_masks_batch_list
+                ):
+                    output_text_mask_loss = 0.0
+                    for mask_batch_list in output_text_masks_batch_list:
+                        batch_ratio = torch.stack(
+                            [mask.mean() for mask in mask_batch_list]
+                        )
+                        output_text_mask_loss = (
+                            output_text_mask_loss
+                            + (
+                                (
+                                    self.model.config.sparse_config[
+                                        "output_text_keep_rate"
+                                    ]
+                                    - batch_ratio
+                                )
+                                ** 2
+                            ).mean()
+                        )
+                    output_text_mask_loss = (
+                        self.model.config.sparse_config["mask_loss_weight"]
+                        * output_text_mask_loss
+                    )
+                    logs["output_text_mask_loss"] = round(output_text_mask_loss, 4)
 
             logs["llm_learning_rate"] = self.lr_scheduler.get_last_lr()[2]
             logs["predictor_learning_rate"] = self.lr_scheduler.get_last_lr()[0]

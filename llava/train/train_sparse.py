@@ -145,7 +145,11 @@ class TrainingArguments(transformers.TrainingArguments):
 @dataclass
 class SparseArguments:
     use_vision_predictor: bool = True
-    vision_keep_rate: float = 0.4
+    vision_keep_rate: float = 0.2
+
+    use_output_text_predictor: bool = True
+    output_text_keep_rate: float = 0.5
+
     sparse_layer: int = 2
     d_model: int = 512
     nhead: int = 8
