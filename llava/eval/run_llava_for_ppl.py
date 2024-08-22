@@ -10,8 +10,7 @@ from llava.constants import (
 )
 from llava.conversation import conv_templates, SeparatorStyle
 
-# from llava.model.builder import load_pretrained_model
-from llava.model.dynamic_llava_builder import load_pretrained_model
+from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import (
     process_images,
@@ -115,8 +114,6 @@ def eval_model(args):
 
     start = time.time()
     with torch.inference_mode():
-        # model.model.config.sparse_config["use_output_text_predictor"] = False
-        # model.model.config.sparse_config["use_vision_predictor"] = False
         outputs = model.generate(
             input_ids,
             images=images_tensor,
@@ -155,7 +152,7 @@ if __name__ == "__main__":
     parser.add_argument("--query", type=str, required=True)
     parser.add_argument("--conv-mode", type=str, default=None)
     parser.add_argument("--sep", type=str, default=",")
-    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--temperature", type=float, default=0)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=512)
