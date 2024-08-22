@@ -531,8 +531,10 @@ class DynamicLLaVATrainer(Trainer):
                                     - batch_ratio
                                 )
                                 ** 2
-                            ).mean()
-                        ).item()
+                            )
+                            .mean()
+                            .item()
+                        )
                     image_masks_loss = (
                         self.model.config.sparse_config["mask_loss_weight"]
                         * image_masks_loss
@@ -549,20 +551,49 @@ class DynamicLLaVATrainer(Trainer):
                 ):
                     output_text_mask_loss = 0.0
                     for mask_batch_list in output_text_masks_batch_list:
+                        # batch_ratio_batch_list = [
+                        #     mask.mean()
+                        #     for mask in mask_batch_list
+                        #     if mask.shape[0]
+                        #     >= self.model.config.sparse_config[
+                        #         "output_text_len_for_training"
+                        #     ]
+                        # ]
+                        # if len(batch_ratio_batch_list):
+                        #     batch_ratio = torch.stack(batch_ratio_batch_list)
+                        #     output_text_mask_loss = (
+                        #         output_text_mask_loss
+                        #         + (
+                        #             (
+                        #                 self.model.config.sparse_config[
+                        #                     "output_text_keep_rate"
+                        #                 ]
+                        #                 - batch_ratio
+                        #             )
+                        #             ** 2
+                        #         ).mean()
+                        #     ).item()
                         batch_ratio = torch.stack(
                             [mask.mean() for mask in mask_batch_list]
                         )
-                        output_text_mask_loss = (
-                            output_text_mask_loss
-                            + (
+                        target_batch_ratio = torch.tensor(
+                            [
                                 (
                                     self.model.config.sparse_config[
                                         "output_text_keep_rate"
                                     ]
-                                    - batch_ratio
+                                    if mask.shape[0]
+                                    >= self.model.config.sparse_config[
+                                        "output_text_len_for_training"
+                                    ]
+                                    else mask.mean().item()
                                 )
-                                ** 2
-                            ).mean()
+                                for mask in mask_batch_list
+                            ]
+                        ).to(dtype=batch_ratio.dtype, device=batch_ratio.device)
+                        output_text_mask_loss = (
+                            output_text_mask_loss
+                            + ((target_batch_ratio - batch_ratio) ** 2).mean().item()
                         )
                     output_text_mask_loss = (
                         self.model.config.sparse_config["mask_loss_weight"]

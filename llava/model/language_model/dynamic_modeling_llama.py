@@ -983,6 +983,7 @@ class DynamicLlamaSdpaAttention(LlamaAttention):
         policy: Optional[torch.Tensor] = None,
         kv_seq_len: Optional[int] = None,
         sparse_layer: Optional[int] = None,
+        output_text_decision: Optional[bool] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
@@ -1037,9 +1038,19 @@ class DynamicLlamaSdpaAttention(LlamaAttention):
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+
+            # for output text reduce
+            if output_text_decision is not None and not output_text_decision:
+                key_states, value_states = past_key_value.update(
+                    key_states[:, :, 0:0, :],
+                    value_states[:, :, 0:0, :],
+                    self.layer_idx,
+                    cache_kwargs,
+                )
+            else:
+                key_states, value_states = past_key_value.update(
+                    key_states, value_states, self.layer_idx, cache_kwargs
+                )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -1200,6 +1211,7 @@ class DynamicLlamaDecoderLayer(nn.Module):
         policy: Optional[torch.Tensor] = None,
         kv_seq_len: Optional[int] = None,
         sparse_layer: Optional[int] = None,
+        output_text_decision: Optional[bool] = None,
         **kwargs,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
@@ -1238,6 +1250,7 @@ class DynamicLlamaDecoderLayer(nn.Module):
             policy=policy,
             kv_seq_len=kv_seq_len,
             sparse_layer=sparse_layer,
+            output_text_decision=output_text_decision,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -1437,11 +1450,11 @@ class OutputTextPredictor(nn.Module):
             nn.Linear(self.d_model // 4, 2),
         )
 
-    def forward(self, x, pre_x, output_text_policy) -> torch.FloatTensor:
+    def forward(self, x, pre_x) -> torch.FloatTensor:
         # q: x, kv: pre_x
         new_x = self.down_mlp(x)
         new_pre_x = self.down_mlp(pre_x)
-        new_x = self.transformer((new_x * output_text_policy, new_pre_x, new_pre_x))[0]
+        new_x = self.transformer((new_x, new_pre_x, new_pre_x))[0]
         predict = self.output_mlp(new_x)
         return predict
 
@@ -1677,23 +1690,26 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
 
         self.gradient_checkpointing = False
 
-        self.sparse_config = config.sparse_config
-        self.image_score_predictor = VisionPredictor(
-            input_dim=config.hidden_size,
-            d_model=self.sparse_config["d_model"],
-            nhead=self.sparse_config["nhead"],
-            dim_feedforward=self.sparse_config["dim_feedforward"],
-            num_layers=self.sparse_config["num_layers"],
-        )
-        self.output_text_score_predictor = OutputTextPredictor(
-            input_dim=config.hidden_size,
-            d_model=self.sparse_config["d_model"],
-            nhead=self.sparse_config["nhead"],
-            dim_feedforward=self.sparse_config["dim_feedforward"],
-            num_layers=self.sparse_config["num_layers"],
-        )
+        # self.sparse_config = config.sparse_config
+        if config.sparse_config["use_vision_predictor"]:
+            self.image_score_predictor = VisionPredictor(
+                input_dim=config.hidden_size,
+                d_model=config.sparse_config["d_model"],
+                nhead=config.sparse_config["nhead"],
+                dim_feedforward=config.sparse_config["dim_feedforward"],
+                num_layers=config.sparse_config["num_layers"],
+            )
+        if config.sparse_config["use_output_text_predictor"]:
+            self.output_text_score_predictor = OutputTextPredictor(
+                input_dim=config.hidden_size,
+                d_model=config.sparse_config["d_model"],
+                nhead=config.sparse_config["nhead"],
+                dim_feedforward=config.sparse_config["dim_feedforward"],
+                num_layers=config.sparse_config["num_layers"],
+            )
 
         self.gumbel_tau = 1.0
+        self.pre_answer = None
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1813,8 +1829,9 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
         image_masks = []
         output_text_masks_batch_list = []
         image_score_predictor_logits = []
+        output_text_decision = None  # for eval kv cache
         if (
-            self.sparse_config["use_vision_predictor"]
+            self.config.sparse_config["use_vision_predictor"]
             and input_embeds_indices is not None
             and hidden_states.shape[0] == len(input_embeds_indices)
         ):
@@ -1835,7 +1852,11 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                 device=hidden_states.device,
             )
 
-        if self.sparse_config["use_output_text_predictor"]:
+        if (
+            self.config.sparse_config["use_output_text_predictor"]
+            and input_embeds_indices is not None
+            and hidden_states.shape[0] == len(input_embeds_indices)
+        ):
             # padding instruct
             init_max_output_text_n = max(
                 input_embeds_indices[b]["answer"][1]
@@ -1865,8 +1886,8 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
             # ----------------------------------------------------------#
             # only for image
             if (
-                self.sparse_config["use_vision_predictor"]
-                and i == self.sparse_config["sparse_layer"]
+                self.config.sparse_config["use_vision_predictor"]
+                and i == self.config.sparse_config["sparse_layer"]
                 and input_embeds_indices is not None
                 and hidden_states.shape[0] == len(input_embeds_indices)
             ):
@@ -1904,174 +1925,174 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     )
                     image_prev_decision = image_hard_keep_decision
 
-                    # token merging
-                    with torch.no_grad():
-                        keep_index_batch_list = [
-                            torch.nonzero(
-                                image_hard_keep_decision[b, :, 0] == 1, as_tuple=False
-                            )
-                            for b in range(B)
-                        ]
-                        unkeep_index_batch_list = [
-                            torch.nonzero(
-                                image_hard_keep_decision[b, :, 0] == 0, as_tuple=False
-                            )
-                            for b in range(B)
-                        ]
+                    # # token merging
+                    # with torch.no_grad():
+                    #     keep_index_batch_list = [
+                    #         torch.nonzero(
+                    #             image_hard_keep_decision[b, :, 0] == 1, as_tuple=False
+                    #         )
+                    #         for b in range(B)
+                    #     ]
+                    #     unkeep_index_batch_list = [
+                    #         torch.nonzero(
+                    #             image_hard_keep_decision[b, :, 0] == 0, as_tuple=False
+                    #         )
+                    #         for b in range(B)
+                    #     ]
 
-                    image_hidden_states = hidden_states[
-                        :,
-                        input_embeds_indices[0]["image"][0] : input_embeds_indices[0][
-                            "image"
-                        ][1],
-                        :,
-                    ]
-                    keep_image_hidden_states_batch_list = [
-                        image_hidden_states[b]
-                        .clone()
-                        .gather(
-                            dim=0,
-                            index=keep_index_batch_list[b].expand(
-                                -1,
-                                image_hidden_states.shape[2],
-                            ),
-                        )
-                        for b in range(B)
-                    ]
-                    unkeep_image_hidden_states_batch_list = [
-                        image_hidden_states[b]
-                        .clone()
-                        .gather(
-                            dim=0,
-                            index=unkeep_index_batch_list[b].expand(
-                                -1,
-                                image_hidden_states.shape[2],
-                            ),
-                        )
-                        for b in range(B)
-                    ]
-                    with torch.no_grad():
-                        keep_image_hidden_states_norm_batch_list = [
-                            (
-                                keep_image_hidden_states_batch_list[b]
-                                / keep_image_hidden_states_batch_list[b].norm(
-                                    dim=-1, keepdim=True
-                                )
-                            )
-                            for b in range(B)
-                        ]
-                        unkeep_image_hidden_states_norm_batch_list = [
-                            (
-                                unkeep_image_hidden_states_batch_list[b]
-                                / unkeep_image_hidden_states_batch_list[b].norm(
-                                    dim=-1, keepdim=True
-                                )
-                            )
-                            for b in range(B)
-                        ]
-                        scores_batch_list = [
-                            (
-                                unkeep_image_hidden_states_norm_batch_list[b]
-                                @ keep_image_hidden_states_norm_batch_list[b].transpose(
-                                    -1, -2
-                                )
-                            )
-                            for b in range(B)
-                        ]
-                        node_idx_batch_list = [
-                            scores_batch_list[b].max(dim=-1)[1] for b in range(B)
-                        ]
-                        merge_unselect_node_index_batch_list = [
-                            node_idx_batch_list[b][..., None] for b in range(B)
-                        ]
+                    # image_hidden_states = hidden_states[
+                    #     :,
+                    #     input_embeds_indices[0]["image"][0] : input_embeds_indices[0][
+                    #         "image"
+                    #     ][1],
+                    #     :,
+                    # ]
+                    # keep_image_hidden_states_batch_list = [
+                    #     image_hidden_states[b]
+                    #     .clone()
+                    #     .gather(
+                    #         dim=0,
+                    #         index=keep_index_batch_list[b].expand(
+                    #             -1,
+                    #             image_hidden_states.shape[2],
+                    #         ),
+                    #     )
+                    #     for b in range(B)
+                    # ]
+                    # unkeep_image_hidden_states_batch_list = [
+                    #     image_hidden_states[b]
+                    #     .clone()
+                    #     .gather(
+                    #         dim=0,
+                    #         index=unkeep_index_batch_list[b].expand(
+                    #             -1,
+                    #             image_hidden_states.shape[2],
+                    #         ),
+                    #     )
+                    #     for b in range(B)
+                    # ]
+                    # with torch.no_grad():
+                    #     keep_image_hidden_states_norm_batch_list = [
+                    #         (
+                    #             keep_image_hidden_states_batch_list[b]
+                    #             / keep_image_hidden_states_batch_list[b].norm(
+                    #                 dim=-1, keepdim=True
+                    #             )
+                    #         )
+                    #         for b in range(B)
+                    #     ]
+                    #     unkeep_image_hidden_states_norm_batch_list = [
+                    #         (
+                    #             unkeep_image_hidden_states_batch_list[b]
+                    #             / unkeep_image_hidden_states_batch_list[b].norm(
+                    #                 dim=-1, keepdim=True
+                    #             )
+                    #         )
+                    #         for b in range(B)
+                    #     ]
+                    #     scores_batch_list = [
+                    #         (
+                    #             unkeep_image_hidden_states_norm_batch_list[b]
+                    #             @ keep_image_hidden_states_norm_batch_list[b].transpose(
+                    #                 -1, -2
+                    #             )
+                    #         )
+                    #         for b in range(B)
+                    #     ]
+                    #     node_idx_batch_list = [
+                    #         scores_batch_list[b].max(dim=-1)[1] for b in range(B)
+                    #     ]
+                    #     merge_unselect_node_index_batch_list = [
+                    #         node_idx_batch_list[b][..., None] for b in range(B)
+                    #     ]
 
-                    for b in range(B):
-                        cur_keep_image_hidden_states = (
-                            keep_image_hidden_states_batch_list[b]
-                        )
-                        cur_unkeep_image_hidden_states = (
-                            unkeep_image_hidden_states_batch_list[b]
-                        )
-                        cur_merge_unselect_node_index = (
-                            merge_unselect_node_index_batch_list[b]
-                        )
+                    # for b in range(B):
+                    #     cur_keep_image_hidden_states = (
+                    #         keep_image_hidden_states_batch_list[b]
+                    #     )
+                    #     cur_unkeep_image_hidden_states = (
+                    #         unkeep_image_hidden_states_batch_list[b]
+                    #     )
+                    #     cur_merge_unselect_node_index = (
+                    #         merge_unselect_node_index_batch_list[b]
+                    #     )
 
-                        temp = torch.zeros_like(cur_keep_image_hidden_states)
-                        size = torch.ones_like(cur_unkeep_image_hidden_states)
-                        size = temp.scatter_add(
-                            dim=0,
-                            index=cur_merge_unselect_node_index.expand(
-                                -1,
-                                cur_unkeep_image_hidden_states.shape[-1],
-                            ),
-                            src=size,
-                        )
-                        cur_merge_unkeep_image_hidden_states = temp.scatter_add(
-                            dim=0,
-                            index=cur_merge_unselect_node_index.expand(
-                                -1,
-                                cur_unkeep_image_hidden_states.shape[-1],
-                            ),
-                            src=cur_unkeep_image_hidden_states,
-                        )
-                        cur_reduced_merge_unkeep_image_hidden_states = (
-                            cur_merge_unkeep_image_hidden_states / size.clamp(min=1)
-                        )
-                        cur_keep_image_hidden_states = (
-                            cur_keep_image_hidden_states
-                            + cur_reduced_merge_unkeep_image_hidden_states
-                        )
-                        # reverse to original hidden states
-                        image_hidden_states[b] = (
-                            image_hidden_states[b]
-                            .clone()
-                            .scatter(
-                                dim=0,
-                                index=keep_index_batch_list[b].expand(
-                                    -1, cur_keep_image_hidden_states.shape[-1]
-                                ),
-                                src=cur_keep_image_hidden_states,
-                            )
-                        )
+                    #     temp = torch.zeros_like(cur_keep_image_hidden_states)
+                    #     size = torch.ones_like(cur_unkeep_image_hidden_states)
+                    #     size = temp.scatter_add(
+                    #         dim=0,
+                    #         index=cur_merge_unselect_node_index.expand(
+                    #             -1,
+                    #             cur_unkeep_image_hidden_states.shape[-1],
+                    #         ),
+                    #         src=size,
+                    #     )
+                    #     cur_merge_unkeep_image_hidden_states = temp.scatter_add(
+                    #         dim=0,
+                    #         index=cur_merge_unselect_node_index.expand(
+                    #             -1,
+                    #             cur_unkeep_image_hidden_states.shape[-1],
+                    #         ),
+                    #         src=cur_unkeep_image_hidden_states,
+                    #     )
+                    #     cur_reduced_merge_unkeep_image_hidden_states = (
+                    #         cur_merge_unkeep_image_hidden_states / size.clamp(min=1)
+                    #     )
+                    #     cur_keep_image_hidden_states = (
+                    #         cur_keep_image_hidden_states
+                    #         + cur_reduced_merge_unkeep_image_hidden_states
+                    #     )
+                    #     # reverse to original hidden states
+                    #     image_hidden_states[b] = (
+                    #         image_hidden_states[b]
+                    #         .clone()
+                    #         .scatter(
+                    #             dim=0,
+                    #             index=keep_index_batch_list[b].expand(
+                    #                 -1, cur_keep_image_hidden_states.shape[-1]
+                    #             ),
+                    #             src=cur_keep_image_hidden_states,
+                    #         )
+                    #     )
 
-                        # keep_state = keep_image_hidden_states_batch_list[b]
+                    # keep_state = keep_image_hidden_states_batch_list[b]
 
-                        # unkeep_state = unkeep_image_hidden_states_batch_list[b]
-                        # indices = merge_unselect_node_index_batch_list[
-                        #     b
-                        # ].squeeze()  # 移除多余的维度
+                    # unkeep_state = unkeep_image_hidden_states_batch_list[b]
+                    # indices = merge_unselect_node_index_batch_list[
+                    #     b
+                    # ].squeeze()  # 移除多余的维度
 
-                        # # 创建一个结果张量，初始化为0
-                        # result_tensor = torch.zeros_like(keep_state)
+                    # # 创建一个结果张量，初始化为0
+                    # result_tensor = torch.zeros_like(keep_state)
 
-                        # # 对于每个索引，聚合并计算平均
-                        # unique_indices, counts = indices.unique(return_counts=True)
-                        # for idx, count in zip(unique_indices, counts):
-                        #     # 获取所有匹配当前索引的位置
-                        #     mask = indices == idx
-                        #     # 聚合这些位置的向量
-                        #     result_tensor[idx] = unkeep_state[mask].sum(0) / count
+                    # # 对于每个索引，聚合并计算平均
+                    # unique_indices, counts = indices.unique(return_counts=True)
+                    # for idx, count in zip(unique_indices, counts):
+                    #     # 获取所有匹配当前索引的位置
+                    #     mask = indices == idx
+                    #     # 聚合这些位置的向量
+                    #     result_tensor[idx] = unkeep_state[mask].sum(0) / count
 
-                        # keep_state = keep_state + result_tensor
-                        # # reverse to original hidden states
-                        # image_hidden_states[b] = (
-                        #     image_hidden_states[b]
-                        #     .clone()
-                        #     .scatter(
-                        #         dim=0,
-                        #         index=keep_index_batch_list[b].expand(
-                        #             -1, keep_state.shape[-1]
-                        #         ),
-                        #         src=keep_state,
-                        #     )
-                        # )
+                    # keep_state = keep_state + result_tensor
+                    # # reverse to original hidden states
+                    # image_hidden_states[b] = (
+                    #     image_hidden_states[b]
+                    #     .clone()
+                    #     .scatter(
+                    #         dim=0,
+                    #         index=keep_index_batch_list[b].expand(
+                    #             -1, keep_state.shape[-1]
+                    #         ),
+                    #         src=keep_state,
+                    #     )
+                    # )
 
-                    if self.sparse_config["maskclip"] is not None:
+                    if self.config.sparse_config["maskclip"] is not None:
                         image_score_predictor_logits.append(image_score_predictor_logit)
                 else:
                     image_score = image_pred_score[:, :, 0]
                     num_keep_node = int(
-                        init_image_n * self.sparse_config["vision_keep_rate"]
+                        init_image_n * self.config.sparse_config["vision_keep_rate"]
                     )
                     keep_index, _ = torch.sort(
                         torch.argsort(image_score, dim=1, descending=True)[
@@ -2122,50 +2143,50 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                             image_hidden_states.shape[2],
                         ),
                     )
-                    # token merging
-                    with torch.no_grad():
-                        keep_image_hidden_states_norm = (
-                            keep_image_hidden_states
-                            / keep_image_hidden_states.norm(dim=-1, keepdim=True)
-                        )
-                        unkeep_image_hidden_states_norm = (
-                            unkeep_image_hidden_states
-                            / unkeep_image_hidden_states.norm(dim=-1, keepdim=True)
-                        )
-                        scores = (
-                            unkeep_image_hidden_states_norm
-                            @ keep_image_hidden_states_norm.transpose(-1, -2)
-                        )
-                        node_max, node_idx = scores.max(dim=-1)
-                        merge_unselect_node_index = node_idx[..., None]
+                    # # token merging
+                    # with torch.no_grad():
+                    #     keep_image_hidden_states_norm = (
+                    #         keep_image_hidden_states
+                    #         / keep_image_hidden_states.norm(dim=-1, keepdim=True)
+                    #     )
+                    #     unkeep_image_hidden_states_norm = (
+                    #         unkeep_image_hidden_states
+                    #         / unkeep_image_hidden_states.norm(dim=-1, keepdim=True)
+                    #     )
+                    #     scores = (
+                    #         unkeep_image_hidden_states_norm
+                    #         @ keep_image_hidden_states_norm.transpose(-1, -2)
+                    #     )
+                    #     node_max, node_idx = scores.max(dim=-1)
+                    #     merge_unselect_node_index = node_idx[..., None]
 
-                    temps = torch.zeros_like(keep_image_hidden_states)
-                    sizes = torch.ones_like(unkeep_image_hidden_states)
-                    sizes = temps.scatter_add(
-                        dim=1,
-                        index=merge_unselect_node_index.expand(
-                            -1,
-                            -1,
-                            unkeep_image_hidden_states.shape[2],
-                        ),
-                        src=sizes,
-                    )
-                    merge_unkeep_image_hidden_states = temps.scatter_add(
-                        dim=1,
-                        index=merge_unselect_node_index.expand(
-                            -1,
-                            -1,
-                            unkeep_image_hidden_states.shape[2],
-                        ),
-                        src=unkeep_image_hidden_states,
-                    )
-                    reduced_merge_unkeep_image_hidden_states = (
-                        merge_unkeep_image_hidden_states / sizes.clamp(min=1)
-                    )
-                    keep_image_hidden_states = (
-                        keep_image_hidden_states
-                        + reduced_merge_unkeep_image_hidden_states
-                    )
+                    # temps = torch.zeros_like(keep_image_hidden_states)
+                    # sizes = torch.ones_like(unkeep_image_hidden_states)
+                    # sizes = temps.scatter_add(
+                    #     dim=1,
+                    #     index=merge_unselect_node_index.expand(
+                    #         -1,
+                    #         -1,
+                    #         unkeep_image_hidden_states.shape[2],
+                    #     ),
+                    #     src=sizes,
+                    # )
+                    # merge_unkeep_image_hidden_states = temps.scatter_add(
+                    #     dim=1,
+                    #     index=merge_unselect_node_index.expand(
+                    #         -1,
+                    #         -1,
+                    #         unkeep_image_hidden_states.shape[2],
+                    #     ),
+                    #     src=unkeep_image_hidden_states,
+                    # )
+                    # reduced_merge_unkeep_image_hidden_states = (
+                    #     merge_unkeep_image_hidden_states / sizes.clamp(min=1)
+                    # )
+                    # keep_image_hidden_states = (
+                    #     keep_image_hidden_states
+                    #     + reduced_merge_unkeep_image_hidden_states
+                    # )
 
                     # for b in range(B):
                     #     keep_state = keep_image_hidden_states[b]
@@ -2235,9 +2256,14 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                         dim=1,
                     )
 
+            if (
+                self.config.sparse_config["use_output_text_predictor"]
+                and i == self.config.sparse_config["sparse_layer"]
+            ):
                 if (
-                    self.sparse_config["use_output_text_predictor"]
-                    and i == self.sparse_config["sparse_layer"]
+                    input_embeds_indices is not None
+                    and hidden_states.shape[0] == len(input_embeds_indices)
+                    and self.training
                 ):
                     # padding pre answer
                     pre_answer_batch_list = [
@@ -2310,52 +2336,96 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
 
                     padded_output_text_score_predictor_logit = (
                         self.output_text_score_predictor(
-                            padded_answer, padded_pre_answer, output_text_prev_decision
+                            padded_answer, padded_pre_answer
                         ).reshape(B, -1, 2)
                     )
                     padded_output_text_pred_score = F.log_softmax(
                         padded_output_text_score_predictor_logit, dim=-1
                     )
-                    if (
-                        self.training
-                        and input_embeds_indices is not None
-                        and hidden_states.shape[0] == len(input_embeds_indices)
-                    ):
-                        output_text_hard_keep_decision = (
-                            F.gumbel_softmax(
-                                padded_output_text_pred_score,
-                                tau=self.gumbel_tau,
-                                hard=True,
-                            )[:, :, 0:1]
-                            * output_text_prev_decision
-                        )
-                        output_text_masks_batch_list.append(
-                            [
+
+                    output_text_hard_keep_decision = (
+                        F.gumbel_softmax(
+                            padded_output_text_pred_score,
+                            tau=self.gumbel_tau,
+                            hard=True,
+                        )[:, :, 0:1]
+                        * output_text_prev_decision
+                    )
+
+                    # for stable training
+                    for b in range(B):
+                        if (
+                            input_embeds_indices[b]["answer"][1]
+                            - input_embeds_indices[b]["answer"][0]
+                            < self.config.sparse_config["output_text_len_for_training"]
+                        ):
+                            output_text_hard_keep_decision[b][
+                                : input_embeds_indices[b]["answer"][1]
+                                - input_embeds_indices[b]["answer"][0],
+                                :,
+                            ] = torch.ones_like(
                                 output_text_hard_keep_decision[b][
                                     : input_embeds_indices[b]["answer"][1]
                                     - input_embeds_indices[b]["answer"][0],
                                     :,
-                                ].reshape(
-                                    input_embeds_indices[b]["answer"][1]
-                                    - input_embeds_indices[b]["answer"][0]
-                                )
-                                for b in range(B)
-                            ]
-                        )
+                                ],
+                                dtype=output_text_hard_keep_decision.dtype,
+                                device=output_text_hard_keep_decision.device,
+                            )
 
-                        if policy is not None:
-                            for b in range(B):
-                                policy[b][
-                                    input_embeds_indices[b]["answer"][
-                                        0
-                                    ] : input_embeds_indices[b]["answer"][1]
-                                ] = output_text_hard_keep_decision[b][
-                                    : input_embeds_indices[b]["answer"][1]
-                                    - input_embeds_indices[b]["answer"][0],
-                                    :,
-                                ]
-                        else:
-                            pass
+                    output_text_masks_batch_list.append(
+                        [
+                            output_text_hard_keep_decision[b][
+                                : input_embeds_indices[b]["answer"][1]
+                                - input_embeds_indices[b]["answer"][0],
+                                :,
+                            ].reshape(
+                                input_embeds_indices[b]["answer"][1]
+                                - input_embeds_indices[b]["answer"][0]
+                            )
+                            for b in range(B)
+                        ]
+                    )
+
+                    if policy is not None:
+                        for b in range(B):
+                            policy[b][
+                                input_embeds_indices[b]["answer"][
+                                    0
+                                ] : input_embeds_indices[b]["answer"][1]
+                            ] = output_text_hard_keep_decision[b][
+                                : input_embeds_indices[b]["answer"][1]
+                                - input_embeds_indices[b]["answer"][0],
+                                :,
+                            ]
+                    else:
+                        pass
+                elif (
+                    not self.training
+                    and not past_key_values_length
+                    and self.pre_answer is None
+                ):  # pre fill stage
+                    self.pre_answer = hidden_states
+                elif (
+                    not self.training
+                    and past_key_values_length
+                    and self.pre_answer is not None
+                ):  # output infer stage
+                    assert (
+                        B == 1
+                    ), "Using output text predictor must keep the batch size to 1"
+                    output_text_score_predictor_logit = (
+                        self.output_text_score_predictor(
+                            hidden_states, self.pre_answer
+                        ).reshape(B, -1, 2)
+                    )
+                    # output_text_pred_score = F.log_softmax(
+                    #     output_text_score_predictor_logit, dim=-1
+                    # )
+                    output_text_decision = (
+                        output_text_score_predictor_logit[0, -1, 0]
+                        > output_text_score_predictor_logit[0, -1, 1]
+                    )
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -2368,7 +2438,8 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     use_cache,
                     policy,
                     init_n,
-                    self.sparse_config["sparse_layer"],
+                    self.config.sparse_config["sparse_layer"],
+                    output_text_decision,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -2380,7 +2451,8 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     use_cache=use_cache,
                     policy=policy,
                     kv_seq_len=init_n,
-                    sparse_layer=self.sparse_config["sparse_layer"],
+                    sparse_layer=self.config.sparse_config["sparse_layer"],
+                    output_text_decision=output_text_decision,
                 )
             # ----------------------------------------------------------#
 
@@ -2576,16 +2648,41 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
             ):
                 output_text_mask_loss = 0.0
                 for mask_batch_list in outputs.output_text_masks_batch_list:
+                    # batch_ratio_batch_list = [
+                    #     mask.mean()
+                    #     for mask in mask_batch_list
+                    #     if mask.shape[0]
+                    #     >= self.config.sparse_config["output_text_len_for_training"]
+                    # ]
+                    # if len(batch_ratio_batch_list):
+                    #     batch_ratio = torch.stack(batch_ratio_batch_list)
+                    #     output_text_mask_loss = (
+                    #         output_text_mask_loss
+                    #         + (
+                    #             (
+                    #                 self.config.sparse_config["output_text_keep_rate"]
+                    #                 - batch_ratio
+                    #             )
+                    #             ** 2
+                    #         ).mean()
+                    #     )
                     batch_ratio = torch.stack([mask.mean() for mask in mask_batch_list])
-                    output_text_mask_loss = (
-                        output_text_mask_loss
-                        + (
+                    target_batch_ratio = torch.tensor(
+                        [
                             (
                                 self.config.sparse_config["output_text_keep_rate"]
-                                - batch_ratio
+                                if mask.shape[0]
+                                >= self.config.sparse_config[
+                                    "output_text_len_for_training"
+                                ]
+                                else mask.mean().item()
                             )
-                            ** 2
-                        ).mean()
+                            for mask in mask_batch_list
+                        ]
+                    ).to(dtype=batch_ratio.dtype, device=batch_ratio.device)
+                    output_text_mask_loss = (
+                        output_text_mask_loss
+                        + ((target_batch_ratio - batch_ratio) ** 2).mean()
                     )
                 loss = (
                     loss

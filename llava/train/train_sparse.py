@@ -149,6 +149,7 @@ class SparseArguments:
 
     use_output_text_predictor: bool = True
     output_text_keep_rate: float = 0.5
+    output_text_len_for_training: int = 20
 
     sparse_layer: int = 2
     d_model: int = 512
