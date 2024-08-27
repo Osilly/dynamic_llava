@@ -15,6 +15,8 @@ from llava.constants import (
 from llava.conversation import conv_templates, SeparatorStyle
 
 from llava.model.builder import load_pretrained_model
+
+# from llava.model.dynamic_llava_builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import (
     tokenizer_image_token,
@@ -24,6 +26,7 @@ from llava.mm_utils import (
 
 from PIL import Image
 import math
+import torch.nn.functional as F
 
 
 def split_list(lst, n):
@@ -46,25 +49,27 @@ def eval_model(args):
         model_path, args.model_base, model_name
     )
 
+    # questions = json.load(open(os.path.expanduser(args.question_file), "r"))
+    # questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
+
     questions = json.load(open(os.path.expanduser(args.question_file), "r"))
-    questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
+
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
     ans_file = open(answers_file, "w")
 
-    image_num = 0
-    sum_self_ppl = 0.0
-    sum_gpt4o_ppl = 0.0
-    sum_masked_answer_token_rate = 0.0
+    total_num = 0
+    sum_ppl = 0.0
 
     for i, line in enumerate(tqdm(questions)):
         idx = line["id"]
-        # question = line["conversations"][0]
-        # qs = question["value"].replace("<image>", "").strip()
-        qs = "Describe the image in detail."
+        qs = line["question"].replace("<image>", "").strip()
         cur_prompt = qs
+        label_answer = line["answer"].strip()
 
-        if "image" in line:
+        try:
+            total_num += 1
+
             image_file = line["image"]
             image = Image.open(os.path.join(args.image_folder, image_file))
             image_tensor = process_images([image], image_processor, model.config)[0]
@@ -81,22 +86,9 @@ def eval_model(args):
             else:
                 qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
             cur_prompt = "<image>" + "\n" + cur_prompt
-        else:
+        except:
+            print("skip!")
             continue
-            # images = None
-            # image_sizes = None
-
-        # if args.single_pred_prompt:
-        #     qs = (
-        #         qs
-        #         + "\n"
-        #         + "Answer with the option's letter from the given choices directly."
-        #     )
-        #     cur_prompt = (
-        #         cur_prompt
-        #         + "\n"
-        #         + "Answer with the option's letter from the given choices directly."
-        #     )
 
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
@@ -111,34 +103,85 @@ def eval_model(args):
             .cuda()
         )
 
-        image_num += 1
-        with torch.inference_mode():
-            outputs = model.generate(
-                input_ids,
-                images=images,
-                image_sizes=image_sizes,
-                do_sample=True if args.temperature > 0 else False,
-                temperature=args.temperature,
-                max_new_tokens=1024,
-                use_cache=True,
-                output_scores=True,
-                return_dict_in_generate=True,
+        label_ids = tokenizer(label_answer).input_ids[1:]
+        past_key_values = None
+        logits = []
+        labels = []
+        # masked_input_ids = None
+        for j, label_id in enumerate(label_ids):
+            label_id = (
+                torch.tensor([label_id])
+                .to(dtype=input_ids.dtype, device=input_ids.device)
+                .unsqueeze(0)
             )
+            # if j == 0:
+            #     input_ids = torch.cat([input_ids, label_id], dim=1)
+            #     continue
 
-        answer = tokenizer.batch_decode(outputs.sequences, skip_special_tokens=False)[
-            0
-        ].strip()
+            if j > 0:
+                images = None
+                image_sizes = None
+            with torch.inference_mode():
+                # outputs = model.generate(
+                #     input_ids,
+                #     images=images,
+                #     image_sizes=image_sizes,
+                #     do_sample=True if args.temperature > 0 else False,
+                #     temperature=args.temperature,
+                #     max_new_tokens=1,
+                #     use_cache=True,
+                #     output_scores=True,
+                #     return_dict_in_generate=True,
+                #     past_key_values=past_key_values,
+                # )
+                outputs = model(
+                    input_ids,
+                    images=images,
+                    image_sizes=image_sizes,
+                    past_key_values=past_key_values,
+                )
+            # input_ids = torch.cat([input_ids, label_id.unsqueeze(0)], dim=1)
+            input_ids = label_id
+            past_key_values = outputs.past_key_values
 
-        # self ppl
-        logits = outputs.scores
-        probs = [torch.softmax(logit, dim=-1) for logit in logits]
-        log_probs = [torch.log(prob) for prob in probs]
-        self_log_probs = [torch.max(log_prob) for log_prob in log_probs]
-        self_ppls = [
-            torch.exp(-self_log_prob).item() for self_log_prob in self_log_probs
-        ]
-        self_ppl = sum(self_ppls) / len(self_ppls)
-        sum_self_ppl += self_ppl
+            # answer = tokenizer.batch_decode(
+            #     outputs.sequences[:, -1], skip_special_tokens=False
+            # )[0].strip()
+            # print(
+            #     answer,
+            #     tokenizer.batch_decode(label_id, skip_special_tokens=False)[0].strip(),
+            # )
+            # print(past_key_values[3][0].shape)
+            # print(forward_data["outputs"])
+
+            # ppl
+            # logits = outputs.scores[0]
+            logit = outputs.logits[:, -1:, :]
+            logits.append(logit)
+            labels.append(label_id)
+
+            # if masked_input_ids is not None:
+            #     masked_input_ids = torch.cat(
+            #         [
+            #             masked_input_ids,
+            #             outputs.sequences[:, -1:][
+            #                 torch.tensor(answer_hard_decisions).unsqueeze(0) == False
+            #             ].unsqueeze(0),
+            #         ],
+            #         dim=1,
+            #     )
+            # else:
+            #     masked_input_ids = outputs.sequences[:, -1:][
+            #         torch.tensor(answer_hard_decisions).unsqueeze(0) == False
+            #     ].unsqueeze(0)
+
+            # print(len(forward_data["outputs"]), forward_data["outputs"])
+
+        logits = torch.cat(logits, dim=1).squeeze(0)
+        labels = torch.cat(labels, dim=1).squeeze(0)
+        log_probs = F.cross_entropy(logits, labels)
+        ppls = torch.exp(log_probs).item()
+        sum_ppl += ppls
 
         ans_id = shortuuid.uuid()
         ans_file.write(
@@ -146,24 +189,24 @@ def eval_model(args):
                 {
                     "question_id": idx,
                     "prompt": cur_prompt,
-                    "answer": answer[4:-4],
+                    # "answer": answer[4:-4],
                     "answer_id": ans_id,
                     "model_id": model_name,
                     "metadata": {},
-                    "answer_token_len": str(outputs.sequences.shape[1] - 2),
-                    "self_ppl": str(self_ppl),
-                    "gpt4o_ppl": str(0.0),
+                    "ppl": str(ppls),
                 }
             )
             + "\n"
         )
         ans_file.flush()
+        # print(str(outputs.sequences.shape[1]), answer)
+        # print(str(masked_input_ids.shape[1]), masked_answer)
+        # print(str(ppl))
 
     ans_file.write(
         json.dumps(
             {
-                "mean_self_ppl": str(sum_self_ppl / image_num),
-                "mean_gpt4o_ppl": str(0.0),
+                "mean_ppl": str(sum_ppl / total_num),
             }
         )
         + "\n"
@@ -171,8 +214,7 @@ def eval_model(args):
     ans_file.flush()
 
     ans_file.close()
-    print("mean_self_ppl: " + str(sum_self_ppl / image_num))
-    print("mean_gpt4o_ppl: " + str(sum_gpt4o_ppl / image_num))
+    print("mean_ppl: " + str(sum_ppl / total_num))
 
 
 if __name__ == "__main__":
