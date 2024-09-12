@@ -251,6 +251,39 @@ class CustomCallback(TrainerCallback):
             state.global_step / state.max_steps,
         )
 
+        # import bisect
+
+        # output_text_stage = bisect.bisect_right(
+        #     args.output_text_len_for_training_step, state.global_step
+        # )
+        # instruct_stage = bisect.bisect_right(
+        #     args.instruct_len_for_training_step, state.global_step
+        # )
+        # if output_text_stage > 0:
+        #     kwargs["model"].model.config.sparse_config[
+        #         "use_output_text_predictor"
+        #     ] = True
+        #     kwargs["model"].model.config.sparse_config[
+        #         "output_text_len_for_training"
+        #     ] = args.output_text_len_for_training_decay[output_text_stage - 1]
+        # else:
+        #     kwargs["model"].model.config.sparse_config[
+        #         "use_output_text_predictor"
+        #     ] = False
+        # if instruct_stage > 0:
+        #     kwargs["model"].model.config.sparse_config["use_instruct_predictor"] = True
+        #     kwargs["model"].model.config.sparse_config["instruct_len_for_training"] = (
+        #         args.instruct_len_for_training_decay[instruct_stage - 1]
+        #     )
+        # else:
+        #     kwargs["model"].model.config.sparse_config["use_instruct_predictor"] = False
+
+        # # copy output_text_predictor weight
+        # if state.global_step == args.instruct_len_for_training_step[0]:
+        #     kwargs["model"].model.instruct_score_predictor.load_state_dict(
+        #         kwargs["model"].model.output_text_score_predictor.state_dict()
+        #     )
+
         # self.forward_data = {"inputs": [], "outputs": []}
 
         # self.forward_data = {"inputs": [], "outputs": []}
@@ -600,6 +633,66 @@ class DynamicLLaVATrainer(Trainer):
                         * output_text_mask_loss
                     )
                     logs["output_text_mask_loss"] = round(output_text_mask_loss, 4)
+
+                instruct_masks_batch_list = (
+                    self.callback_handler.__dict__["callbacks"][-1]
+                    .forward_data["outputs"]
+                    .instruct_masks_batch_list
+                )
+                if instruct_masks_batch_list is not None and len(
+                    instruct_masks_batch_list
+                ):
+                    instruct_mask_loss = 0.0
+                    for mask_batch_list in instruct_masks_batch_list:
+                        # batch_ratio_batch_list = [
+                        #     mask.mean()
+                        #     for mask in mask_batch_list
+                        #     if mask.shape[0]
+                        #     >= self.model.config.sparse_config[
+                        #         "output_text_len_for_training"
+                        #     ]
+                        # ]
+                        # if len(batch_ratio_batch_list):
+                        #     batch_ratio = torch.stack(batch_ratio_batch_list)
+                        #     output_text_mask_loss = (
+                        #         output_text_mask_loss
+                        #         + (
+                        #             (
+                        #                 self.model.config.sparse_config[
+                        #                     "output_text_keep_rate"
+                        #                 ]
+                        #                 - batch_ratio
+                        #             )
+                        #             ** 2
+                        #         ).mean()
+                        #     ).item()
+                        batch_ratio = torch.stack(
+                            [mask.mean() for mask in mask_batch_list]
+                        )
+                        target_batch_ratio = torch.tensor(
+                            [
+                                (
+                                    self.model.config.sparse_config[
+                                        "instruct_keep_rate"
+                                    ]
+                                    if mask.shape[0]
+                                    >= self.model.config.sparse_config[
+                                        "instruct_len_for_training"
+                                    ]
+                                    else mask.mean().item()
+                                )
+                                for mask in mask_batch_list
+                            ]
+                        ).to(dtype=batch_ratio.dtype, device=batch_ratio.device)
+                        instruct_mask_loss = (
+                            instruct_mask_loss
+                            + ((target_batch_ratio - batch_ratio) ** 2).mean().item()
+                        )
+                    instruct_mask_loss = (
+                        self.model.config.sparse_config["mask_loss_weight"]
+                        * instruct_mask_loss
+                    )
+                    logs["instruct_mask_loss"] = round(instruct_mask_loss, 4)
 
             logs["llm_learning_rate"] = self.lr_scheduler.get_last_lr()[2]
             logs["predictor_learning_rate"] = self.lr_scheduler.get_last_lr()[0]

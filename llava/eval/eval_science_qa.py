@@ -117,6 +117,9 @@ if __name__ == "__main__":
     sqa_results["acc"] = correct / total * 100
     sqa_results["correct"] = correct
     sqa_results["count"] = total
+    sqa_results["multimodal_acc"] = multimodal_correct / multimodal_total * 100
+    sqa_results["multimodal_correct"] = multimodal_correct
+    sqa_results["multimodal_count"] = multimodal_total
 
     with open(args.output_file, "w") as f:
         json.dump(results, f, indent=2)

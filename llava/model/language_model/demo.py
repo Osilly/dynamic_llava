@@ -76,7 +76,33 @@
 # for i, result in enumerate(result_list):
 #     print(f"Batch {i} Result:\n{result}")
 
-a = [1, 2]
-b = a
-b[0] = 3
-print(a)
+# a = [1, 2]
+# b = a
+# b[0] = 3
+# print(a)
+
+# import torch
+
+# # 假设的维度和数据
+# B, H, N, C = 2, 3, 5, 4  # 示例维度
+# key_states = torch.randn(B, H, N, C)  # 随机生成的key_states数据
+# # decision = torch.tensor([True, False, True, False, True])  # 示例决策矩阵
+# decision = torch.tensor([False, False, False, False, False])  # 示例决策矩阵
+
+# # # 取反决策矩阵
+# # inverse_decision = ~decision
+
+# # 扩展decision的维度来匹配key_states的前三个维度
+# expanded_decision = decision.unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(B, H, -1, C)
+
+# # 使用布尔索引进行选择
+# selected_key_states = key_states[expanded_decision].view(B, H, -1, C)
+
+# # 打印结果以确认
+# print(selected_key_states.shape)  # 应当是 [B, H, N1, C] 其中N1是decision中False的数量
+# print(selected_key_states)
+
+import bisect
+
+
+print(bisect.bisect_right([0, 2000, 4000], 0))
