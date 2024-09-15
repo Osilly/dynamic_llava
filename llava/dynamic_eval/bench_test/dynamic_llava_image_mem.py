@@ -56,9 +56,15 @@ def eval_model(args):
     disable_torch_init()
 
     model_name = get_model_name_from_path(args.model_path)
+    torch.cuda.reset_max_memory_allocated()
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         args.model_path, args.model_base, model_name
     )
+    model.model.config.sparse_config["use_vision_predictor"] = True
+    model.model.config.sparse_config["use_instruct_predictor"] = False
+    model.model.config.sparse_config["use_output_text_predictor"] = False
+    model_memory = torch.cuda.max_memory_allocated()
+    print("model memory: " + str(model_memory))
 
     qs = args.query
     image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
@@ -106,17 +112,18 @@ def eval_model(args):
     images_tensor = process_images(images, image_processor, model.config).to(
         model.device, dtype=torch.float16
     )
+    # print(images_tensor.shape)
 
-    input_ids = (
-        tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-        .unsqueeze(0)
-        .cuda()
-    )
+    # input_ids = (
+    #     tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+    #     .unsqueeze(0)
+    #     .cuda()
+    # )
+    input_ids = torch.tensor([[1, -200, 1]]).cuda()
 
-    start = time.time()
+    # start = time.time()
+    torch.cuda.reset_max_memory_allocated()
     with torch.inference_mode():
-        # model.model.config.sparse_config["use_output_text_predictor"] = False
-        # model.model.config.sparse_config["use_vision_predictor"] = False
         outputs = model.generate(
             input_ids,
             images=images_tensor,
@@ -125,28 +132,30 @@ def eval_model(args):
             temperature=args.temperature,
             top_p=args.top_p,
             num_beams=args.num_beams,
-            max_new_tokens=args.max_new_tokens,
             use_cache=True,
             output_scores=True,
             return_dict_in_generate=True,
+            min_new_tokens=2,
+            max_new_tokens=2,
         )
 
-    end = time.time()
-    print("time:\n", end - start)
+    max_memory = torch.cuda.max_memory_allocated()
+    print("max memory: " + str(max_memory))
+    print("without model memory: " + str(max_memory - model_memory))
+    # end = time.time()
+    # print("time:\n", end - start)
 
-    output_ids = outputs.sequences
-    text = [
-        t.strip() for t in tokenizer.batch_decode(output_ids, skip_special_tokens=True)
-    ]
-    print("text:\n" + str(text))
+    # output_ids = outputs.sequences
+    # text = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+    # print("text:\n" + text)
 
-    logits = outputs.scores
-    probs = [torch.softmax(logit, dim=-1) for logit in logits]
-    log_probs = [torch.log(prob) for prob in probs]
-    max_log_probs = [torch.max(log_prob) for log_prob in log_probs]
-    ppls = [torch.exp(-max_log_prob).item() for max_log_prob in max_log_probs]
-    mean_ppl = sum(ppls) / len(ppls)
-    print("mean perplexity:\n" + str(mean_ppl))
+    # logits = outputs.scores
+    # probs = [torch.softmax(logit, dim=-1) for logit in logits]
+    # log_probs = [torch.log(prob) for prob in probs]
+    # max_log_probs = [torch.max(log_prob) for log_prob in log_probs]
+    # ppls = [torch.exp(-max_log_prob).item() for max_log_prob in max_log_probs]
+    # mean_ppl = sum(ppls) / len(ppls)
+    # print("mean perplexity:\n" + str(mean_ppl))
 
 
 if __name__ == "__main__":

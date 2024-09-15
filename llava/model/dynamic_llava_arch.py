@@ -507,61 +507,61 @@ class DynamicLlavaMetaForCausalLM(ABC):
                 )
             ]
             special_user_starts = special_user_matches
-            special_user_ends = [
-                m + special_user_seq_len - 1 for m in special_user_matches
-            ]
+            # special_user_ends = [
+            #     m + special_user_seq_len - 1 for m in special_user_matches
+            # ]
 
-            special_assistant = torch.tensor(
-                special_text["ASSISTANT:"], device=cur_instruct_ids.device
-            )
-            special_assistant_seq_len = len(special_assistant)
-            special_assistant_matches = [
-                i
-                for i in range(len(cur_instruct_ids) - special_assistant_seq_len + 1)
-                if torch.equal(
-                    cur_instruct_ids[i : i + special_assistant_seq_len],
-                    special_assistant,
-                )
-            ]
-            special_assistant_starts = special_assistant_matches
-            special_assistant_ends = [
-                m + special_assistant_seq_len - 1 for m in special_assistant_matches
-            ]
+            # special_assistant = torch.tensor(
+            #     special_text["ASSISTANT:"], device=cur_instruct_ids.device
+            # )
+            # special_assistant_seq_len = len(special_assistant)
+            # special_assistant_matches = [
+            #     i
+            #     for i in range(len(cur_instruct_ids) - special_assistant_seq_len + 1)
+            #     if torch.equal(
+            #         cur_instruct_ids[i : i + special_assistant_seq_len],
+            #         special_assistant,
+            #     )
+            # ]
+            # special_assistant_starts = special_assistant_matches
+            # special_assistant_ends = [
+            #     m + special_assistant_seq_len - 1 for m in special_assistant_matches
+            # ]
 
-            if len(special_user_ends):
-                cur_last_instruct_start_position = special_user_ends[-1] + 1
+            if len(special_user_starts):
+                cur_last_instruct_start_position = special_user_starts[-1]
             else:
                 cur_last_instruct_start_position = 0
-            cur_last_instruct_end_position = special_assistant_starts[-1]
+            # cur_last_instruct_end_position = special_assistant_starts[-1]
 
-            if maskclip is not None:
-                maskclip.initialize_negative_text_embeds()
+            # if maskclip is not None:
+            #     maskclip.initialize_negative_text_embeds()
 
-                cur_last_instruct_ids = cur_instruct_ids[
-                    cur_last_instruct_start_position:cur_last_instruct_end_position
-                ]
+            #     cur_last_instruct_ids = cur_instruct_ids[
+            #         cur_last_instruct_start_position:cur_last_instruct_end_position
+            #     ]
 
-                cur_postive_classes_names = [
-                    llm_tokenizer.decode(
-                        torch.cat([cur_last_instruct_ids, cur_answer_ids[:-1]])
-                    )
-                ]
+            #     cur_postive_classes_names = [
+            #         llm_tokenizer.decode(
+            #             torch.cat([cur_last_instruct_ids, cur_answer_ids[:-1]])
+            #         )
+            #     ]
 
-                cur_maskclip_text_embeds = maskclip.get_full_text_embeds(
-                    cur_postive_classes_names
-                )
-                cur_image = images[cur_image_idx - 1 : cur_image_idx]
-                if self.config.sparse_config["maskclip_distill_token_rate"] is not None:
-                    k = int(
-                        cur_image_embeds.shape[0]
-                        * self.config.sparse_config["maskclip_distill_token_rate"]
-                    )
-                else:
-                    k = None
+            #     cur_maskclip_text_embeds = maskclip.get_full_text_embeds(
+            #         cur_postive_classes_names
+            #     )
+            #     cur_image = images[cur_image_idx - 1 : cur_image_idx]
+            #     if self.config.sparse_config["maskclip_distill_token_rate"] is not None:
+            #         k = int(
+            #             cur_image_embeds.shape[0]
+            #             * self.config.sparse_config["maskclip_distill_token_rate"]
+            #         )
+            #     else:
+            #         k = None
 
-                cur_maskclip_mask = maskclip(cur_maskclip_text_embeds, cur_image, k=k)
+            #     cur_maskclip_mask = maskclip(cur_maskclip_text_embeds, cur_image, k=k)
 
-                maskclip_mask.append(cur_maskclip_mask)
+            #     maskclip_mask.append(cur_maskclip_mask)
 
             # ----------------------------------------------------------#
 
@@ -576,9 +576,9 @@ class DynamicLlavaMetaForCausalLM(ABC):
             last_instruct_embeds_start_position = (
                 instruct_embeds_start_position + cur_last_instruct_start_position
             )
-            last_instruct_embeds_end_position = (
-                instruct_embeds_start_position + cur_last_instruct_end_position
-            )
+            # last_instruct_embeds_end_position = (
+            #     instruct_embeds_start_position + cur_last_instruct_end_position
+            # )
             cur_input_embeds_indices = {
                 "system": [0, image_embeds_start_position],
                 "image": [image_embeds_start_position, instruct_embeds_start_position],
@@ -592,7 +592,8 @@ class DynamicLlavaMetaForCausalLM(ABC):
                 ],
                 "last_instruct": [
                     last_instruct_embeds_start_position,
-                    last_instruct_embeds_end_position,
+                    answer_embeds_start_position,
+                    # last_instruct_embeds_end_position,
                 ],
             }
             input_embeds_indices.append(cur_input_embeds_indices)

@@ -10,8 +10,7 @@ from llava.constants import (
 )
 from llava.conversation import conv_templates, SeparatorStyle
 
-# from llava.model.builder import load_pretrained_model
-from llava.model.dynamic_llava_builder import load_pretrained_model
+from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import (
     process_images,
@@ -56,9 +55,12 @@ def eval_model(args):
     disable_torch_init()
 
     model_name = get_model_name_from_path(args.model_path)
+    torch.cuda.reset_max_memory_allocated()
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         args.model_path, args.model_base, model_name
     )
+    model_memory = torch.cuda.max_memory_allocated()
+    print("model memory: " + str(model_memory))
 
     qs = args.query
     image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
@@ -107,16 +109,10 @@ def eval_model(args):
         model.device, dtype=torch.float16
     )
 
-    input_ids = (
-        tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-        .unsqueeze(0)
-        .cuda()
-    )
+    input_ids = torch.tensor([[1, -200, 1]]).cuda()
 
-    start = time.time()
+    torch.cuda.reset_max_memory_allocated()
     with torch.inference_mode():
-        # model.model.config.sparse_config["use_output_text_predictor"] = False
-        # model.model.config.sparse_config["use_vision_predictor"] = False
         outputs = model.generate(
             input_ids,
             images=images_tensor,
@@ -125,28 +121,16 @@ def eval_model(args):
             temperature=args.temperature,
             top_p=args.top_p,
             num_beams=args.num_beams,
-            max_new_tokens=args.max_new_tokens,
             use_cache=True,
             output_scores=True,
             return_dict_in_generate=True,
+            min_new_tokens=2,
+            max_new_tokens=2,
         )
 
-    end = time.time()
-    print("time:\n", end - start)
-
-    output_ids = outputs.sequences
-    text = [
-        t.strip() for t in tokenizer.batch_decode(output_ids, skip_special_tokens=True)
-    ]
-    print("text:\n" + str(text))
-
-    logits = outputs.scores
-    probs = [torch.softmax(logit, dim=-1) for logit in logits]
-    log_probs = [torch.log(prob) for prob in probs]
-    max_log_probs = [torch.max(log_prob) for log_prob in log_probs]
-    ppls = [torch.exp(-max_log_prob).item() for max_log_prob in max_log_probs]
-    mean_ppl = sum(ppls) / len(ppls)
-    print("mean perplexity:\n" + str(mean_ppl))
+    max_memory = torch.cuda.max_memory_allocated()
+    print("max memory: " + str(max_memory))
+    print("without model memory: " + str(max_memory - model_memory))
 
 
 if __name__ == "__main__":
