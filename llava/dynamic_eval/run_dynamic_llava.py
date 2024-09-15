@@ -135,8 +135,10 @@ def eval_model(args):
     print("time:\n", end - start)
 
     output_ids = outputs.sequences
-    text = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
-    print("text:\n" + text)
+    text = [
+        t.strip() for t in tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+    ]
+    print("text:\n" + str(text))
 
     logits = outputs.scores
     probs = [torch.softmax(logit, dim=-1) for logit in logits]
