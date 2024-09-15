@@ -20,7 +20,12 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache
+
+# ----------------------------------------------------------#
+# from transformers.cache_utils import Cache, DynamicCache
+from .cache_utils import Cache, DynamicCachePlus
+
+# ----------------------------------------------------------#
 from transformers.modeling_attn_mask_utils import (
     AttentionMaskConverter,
     _prepare_4d_attention_mask,
@@ -1056,33 +1061,59 @@ class DynamicLlamaSdpaAttention(LlamaAttention):
             #     key_states, value_states = past_key_value.update(
             #         key_states, value_states, self.layer_idx, cache_kwargs
             #     )
-            if text_decision is not None:
-                B, H, _, C = key_states.shape
-                expanded_decision = (
-                    torch.tensor(text_decision)
-                    .to(device=key_states.device)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                    .unsqueeze(-1)
-                    .expand(
-                        B,
-                        H,
-                        -1,
-                        C,
-                    )
-                )
-                keep_key_states = key_states[expanded_decision].view(B, H, -1, C)
-                keep_value_states = value_states[expanded_decision].view(B, H, -1, C)
-                key_states, value_states = past_key_value.update(
-                    keep_key_states,
-                    keep_value_states,
-                    self.layer_idx,
-                    cache_kwargs,
-                )
-            else:
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, self.layer_idx, cache_kwargs
-                )
+
+            # if text_decision is not None:
+            #     if text_decision.shape[1] == 1:  # for output token
+            #         if not text_decision[0]:
+            #             key_states, value_states = past_key_value.update(
+            #                 key_states,
+            #                 value_states,
+            #                 self.layer_idx,
+            #                 cache_kwargs,
+            #                 text_decision,
+            #             )
+            #         else:
+            #             key_states, value_states = past_key_value.update(
+            #                 key_states, value_states, self.layer_idx, cache_kwargs
+            #             )
+            #     else:  # for new instruct
+            #         B, H, _, C = key_states.shape
+            #         expanded_decision = (
+            #             torch.tensor(text_decision)
+            #             .to(device=key_states.device)
+            #             .unsqueeze(0)
+            #             .unsqueeze(0)
+            #             .unsqueeze(-1)
+            #             .expand(
+            #                 B,
+            #                 H,
+            #                 -1,
+            #                 C,
+            #             )
+            #         )
+            #         keep_key_states = key_states[expanded_decision].view(B, H, -1, C)
+            #         keep_value_states = value_states[expanded_decision].view(
+            #             B, H, -1, C
+            #         )
+            #         key_states, value_states = past_key_value.update(
+            #             keep_key_states,
+            #             keep_value_states,
+            #             self.layer_idx,
+            #             cache_kwargs,
+            #         )
+            # else:
+            #     key_states, value_states = past_key_value.update(
+            #         key_states, value_states, self.layer_idx, cache_kwargs
+            #     )
+            # ----------------------------------------------------------#
+            key_states, value_states = past_key_value.update(
+                key_states,
+                value_states,
+                self.layer_idx,
+                cache_kwargs,
+                text_decision,
+            )
+            # ----------------------------------------------------------#
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -1624,7 +1655,10 @@ class DynamicModelOutputWithPast(ModelOutput):
     """
 
     last_hidden_state: torch.FloatTensor = None
-    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    past_key_values: Optional[
+        Tuple[Tuple[Tuple[torch.FloatTensor]], torch.IntTensor]
+    ] = None
+    # true_cache_length: Optional[List[torch.FloatTensor]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     image_masks: Optional[List[torch.FloatTensor]] = None
@@ -1878,7 +1912,10 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
         if use_cache:
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                # ----------------------------------------------------------#
+                # past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                past_key_values = DynamicCachePlus.from_legacy_cache(past_key_values)
+                # ----------------------------------------------------------#
             past_key_values_length = past_key_values.get_usable_length(seq_length)
 
         if position_ids is None:
@@ -2838,19 +2875,18 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     and hidden_states.shape[1] == 1
                     and self.config.sparse_config["use_output_text_predictor"]
                 ):  # output infer stage
-                    assert B == 1, "Using text predictor must keep the batch size to 1"
+                    # assert B == 1, "Using text predictor must keep the batch size to 1"
                     # text_score_predictor_logit = self.output_text_score_predictor(
                     #     hidden_states
                     # ).reshape(B, -1, 2)
                     text_score_predictor_logit = self.output_text_score_predictor(
                         hidden_states
                     ).reshape(B, -1, 2)
-                    text_decision = [
-                        (
-                            text_score_predictor_logit[0, -1, 0]
-                            > text_score_predictor_logit[0, -1, 1]
-                        )
-                    ]
+                    text_decision = (
+                        text_score_predictor_logit[:, :, 0]
+                        > text_score_predictor_logit[:, :, 1]
+                    )
+
                     # self.pre_answer = torch.cat([self.pre_answer, hidden_states], dim=1)
                 elif (
                     not self.training
@@ -2859,7 +2895,7 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     and hidden_states.shape[1] > 1
                     and self.config.sparse_config["use_instruct_predictor"]
                 ):  # for new instrct
-                    assert B == 1, "Using text predictor must keep the batch size to 1"
+                    # assert B == 1, "Using text predictor must keep the batch size to 1"
                     # self.pre_answer = torch.cat([self.pre_answer, hidden_states], dim=1)
                     # text_score_predictor_logit = self.instruct_score_predictor(
                     #     hidden_states
@@ -2867,14 +2903,11 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     text_score_predictor_logit = self.instruct_score_predictor(
                         hidden_states
                     ).reshape(B, -1, 2)
-                    text_decision = [
-                        (
-                            text_score_predictor_logit[0, n, 0]
-                            > text_score_predictor_logit[0, n, 1]
-                        )
-                        for n in text_score_predictor_logit.shape[1]
-                    ]
-                    text_decision[-1:] = True
+                    text_decision = (
+                        text_score_predictor_logit[:, :, 0]
+                        > text_score_predictor_logit[:, :, 1]
+                    )
+                    text_decision[:, -1:] = True
                     # # new instruct template, "USER: **** ASSISTANT:"
                     # text_decision[:2] = True
                     # text_decision[-5:] = True
@@ -2934,6 +2967,9 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                 if use_legacy_cache
                 else next_decoder_cache
             )
+            # # ----------------------------------------------------------#
+            # next_true_cache_length = next_decoder_cache.true_cache_length
+            # # ----------------------------------------------------------#
         if not return_dict:
             return tuple(
                 v
@@ -2943,6 +2979,7 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
         return DynamicModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
+            # true_cache_length=next_true_cache_length,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
             image_masks=image_masks,
@@ -3274,7 +3311,9 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
                 past_length = past_key_values.seen_tokens
                 max_cache_length = past_key_values.get_max_length()
             else:
-                cache_length = past_length = past_key_values[0][0].shape[2]
+                # ----------------------------------------------------------#
+                cache_length = past_length = past_key_values[0][0][0].shape[2]
+                # ----------------------------------------------------------#
                 max_cache_length = None
 
             # Keep only the unprocessed tokens:
@@ -3328,13 +3367,15 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
     @staticmethod
     def _reorder_cache(past_key_values, beam_idx):
         reordered_past = ()
-        for layer_past in past_key_values:
+        # ----------------------------------------------------------#
+        for layer_past in past_key_values[0]:
             reordered_past += (
                 tuple(
                     past_state.index_select(0, beam_idx.to(past_state.device))
                     for past_state in layer_past
                 ),
             )
+        # ----------------------------------------------------------#
         return reordered_past
 
 
