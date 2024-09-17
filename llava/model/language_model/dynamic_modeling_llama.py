@@ -1995,51 +1995,54 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                 device=hidden_states.device,
             )
 
-        if (
-            self.config.sparse_config["use_text_predictor"]
-            and input_embeds_indices is not None
-            and hidden_states.shape[0] == len(input_embeds_indices)
-        ):
-            # padding answer
-            init_max_output_text_n = max(
-                input_embeds_indices[b]["answer"][1]
-                - input_embeds_indices[b]["answer"][0]
-                for b in range(B)
-            )
-            output_text_prev_decision = torch.ones(
-                B,
-                init_max_output_text_n,
-                1,
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-            for b in range(B):
-                output_text_prev_decision[
-                    b,
-                    input_embeds_indices[b]["answer"][1]
-                    - input_embeds_indices[b]["answer"][0] :,
-                    :,
-                ] = 0
-            # padding instruct
-            init_max_instruct_n = max(
-                input_embeds_indices[b]["last_instruct"][1]
-                - input_embeds_indices[b]["last_instruct"][0]
-                for b in range(B)
-            )
-            instruct_prev_decision = torch.ones(
-                B,
-                init_max_instruct_n,
-                1,
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-            for b in range(B):
-                instruct_prev_decision[
-                    b,
-                    input_embeds_indices[b]["last_instruct"][1]
-                    - input_embeds_indices[b]["last_instruct"][0] :,
-                    :,
-                ] = 0
+            # if (
+            #     self.config.sparse_config["use_text_predictor"]
+            #     and input_embeds_indices is not None
+            #     and hidden_states.shape[0] == len(input_embeds_indices)
+            # ):
+            #     # padding answer
+            #     if self.config.sparse_config["use_output_text_predictor"]:
+            #         init_max_output_text_n = max(
+            #             input_embeds_indices[b]["answer"][1]
+            #             - input_embeds_indices[b]["answer"][0]
+            #             for b in range(B)
+            #         )
+            #         output_text_prev_decision = torch.ones(
+            #             B,
+            #             init_max_output_text_n,
+            #             1,
+            #             dtype=hidden_states.dtype,
+            #             device=hidden_states.device,
+            #         )
+            #         for b in range(B):
+            #             output_text_prev_decision[
+            #                 b,
+            #                 input_embeds_indices[b]["answer"][1]
+            #                 - input_embeds_indices[b]["answer"][0] :,
+            #                 :,
+            #             ] = 0
+
+            # # padding instruct
+            # if self.config.sparse_config["use_instruct_predictor"]:
+            #     init_max_instruct_n = max(
+            #         input_embeds_indices[b]["last_instruct"][1]
+            #         - input_embeds_indices[b]["last_instruct"][0]
+            #         for b in range(B)
+            #     )
+            #     instruct_prev_decision = torch.ones(
+            #         B,
+            #         init_max_instruct_n,
+            #         1,
+            #         dtype=hidden_states.dtype,
+            #         device=hidden_states.device,
+            #     )
+            #     for b in range(B):
+            #         instruct_prev_decision[
+            #             b,
+            #             input_embeds_indices[b]["last_instruct"][1]
+            #             - input_embeds_indices[b]["last_instruct"][0] :,
+            #             :,
+            #         ] = 0
         # ----------------------------------------------------------#
 
         for i, decoder_layer in enumerate(self.layers):
@@ -2502,7 +2505,28 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
 
                     # for output token
                     if self.config.sparse_config["use_output_text_predictor"]:
+
                         # padding answer
+                        init_max_output_text_n = max(
+                            input_embeds_indices[b]["answer"][1]
+                            - input_embeds_indices[b]["answer"][0]
+                            for b in range(B)
+                        )
+                        output_text_prev_decision = torch.ones(
+                            B,
+                            init_max_output_text_n,
+                            1,
+                            dtype=hidden_states.dtype,
+                            device=hidden_states.device,
+                        )
+                        for b in range(B):
+                            output_text_prev_decision[
+                                b,
+                                input_embeds_indices[b]["answer"][1]
+                                - input_embeds_indices[b]["answer"][0] :,
+                                :,
+                            ] = 0
+
                         answer_batch_list = [
                             hidden_states[b][
                                 input_embeds_indices[b]["answer"][
@@ -2617,6 +2641,26 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     # for instruct token
                     if self.config.sparse_config["use_instruct_predictor"]:
                         # padding instruct
+                        init_max_instruct_n = max(
+                            input_embeds_indices[b]["last_instruct"][1]
+                            - input_embeds_indices[b]["last_instruct"][0]
+                            for b in range(B)
+                        )
+                        instruct_prev_decision = torch.ones(
+                            B,
+                            init_max_instruct_n,
+                            1,
+                            dtype=hidden_states.dtype,
+                            device=hidden_states.device,
+                        )
+                        for b in range(B):
+                            instruct_prev_decision[
+                                b,
+                                input_embeds_indices[b]["last_instruct"][1]
+                                - input_embeds_indices[b]["last_instruct"][0] :,
+                                :,
+                            ] = 0
+
                         instruct_batch_list = [
                             hidden_states[b][
                                 input_embeds_indices[b]["last_instruct"][
