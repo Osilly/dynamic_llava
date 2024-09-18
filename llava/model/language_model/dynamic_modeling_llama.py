@@ -1395,52 +1395,52 @@ class VisionPredictor(nn.Module):
             # nn.LogSoftmax(dim=-1),
         )
 
-    def forward(self, x, input_embeds_indices, image_policy) -> torch.FloatTensor:
+    def forward(self, x, image_policy) -> torch.FloatTensor:
         predict = []
-        image = []
-        # instruct = []
-        image_len = (
-            input_embeds_indices[0]["image"][1] - input_embeds_indices[0]["image"][0]
-        )
-        for index in range(x.shape[0]):
-            cur_input_embeds_indices = input_embeds_indices[index]
-            cur_image = x[
-                index,
-                cur_input_embeds_indices["image"][0] : cur_input_embeds_indices[
-                    "image"
-                ][1],
-                :,
-            ]
-            # cur_instruct = x[
-            #     index,
-            #     cur_input_embeds_indices["instruct"][0] : cur_input_embeds_indices[
-            #         "instruct"
-            #     ][1],
-            #     :,
-            # ]
-            image.append(cur_image)
-            # instruct.append(cur_instruct)
+        # image = []
+        # # instruct = []
+        # image_len = (
+        #     input_embeds_indices[0]["image"][1] - input_embeds_indices[0]["image"][0]
+        # )
+        # for index in range(x.shape[0]):
+        #     cur_input_embeds_indices = input_embeds_indices[index]
+        #     cur_image = x[
+        #         index,
+        #         cur_input_embeds_indices["image"][0] : cur_input_embeds_indices[
+        #             "image"
+        #         ][1],
+        #         :,
+        #     ]
+        #     # cur_instruct = x[
+        #     #     index,
+        #     #     cur_input_embeds_indices["instruct"][0] : cur_input_embeds_indices[
+        #     #         "instruct"
+        #     #     ][1],
+        #     #     :,
+        #     # ]
+        #     image.append(cur_image)
+        #     # instruct.append(cur_instruct)
 
-        new_image_input = []
-        max_image_len = max(cur_image.shape[0] for cur_image in image)
-        for cur_image in image:
-            cur_len = cur_image.shape[0]
-            new_image_input.append(
-                torch.cat(
-                    [
-                        cur_image,
-                        torch.zeros(
-                            (max_image_len - cur_len, cur_image.shape[1]),
-                            dtype=cur_image.dtype,
-                            device=cur_image.device,
-                        ),
-                    ],
-                    dim=0,
-                )
-            )
+        # new_image_input = []
+        # max_image_len = max(cur_image.shape[0] for cur_image in image)
+        # for cur_image in image:
+        #     cur_len = cur_image.shape[0]
+        #     new_image_input.append(
+        #         torch.cat(
+        #             [
+        #                 cur_image,
+        #                 torch.zeros(
+        #                     (max_image_len - cur_len, cur_image.shape[1]),
+        #                     dtype=cur_image.dtype,
+        #                     device=cur_image.device,
+        #                 ),
+        #             ],
+        #             dim=0,
+        #         )
+        #     )
 
-        new_image_x = torch.stack(new_image_input, dim=0)
-        new_image_x = self.down_mlp(new_image_x)
+        # new_image_x = torch.stack(new_image_input, dim=0)
+        # new_image_x = self.down_mlp(new_image_x)
 
         # new_instruct_input = []
         # max_instruct_len = max(cur_instruct.shape[0] for cur_instruct in instruct)
@@ -1468,6 +1468,7 @@ class VisionPredictor(nn.Module):
         #     (new_image_x * image_policy, new_instruct_x, new_instruct_x)
         # )[0]
 
+        new_image_x = self.down_mlp(x)
         new_x = self.transformer(new_image_x * image_policy)
         B, N, C = new_x.size()
         local_x = new_x[:, :, : C // 2]
@@ -2087,8 +2088,52 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                 and input_embeds_indices is not None
                 and hidden_states.shape[0] == len(input_embeds_indices)
             ):
+                image = []
+                # instruct = []
+                # image_len = (
+                #     input_embeds_indices[0]["image"][1] - input_embeds_indices[0]["image"][0]
+                # )
+                for index in range(hidden_states.shape[0]):
+                    cur_input_embeds_indices = input_embeds_indices[index]
+                    cur_image = hidden_states[
+                        index,
+                        cur_input_embeds_indices["image"][0] : cur_input_embeds_indices[
+                            "image"
+                        ][1],
+                        :,
+                    ]
+                    # cur_instruct = x[
+                    #     index,
+                    #     cur_input_embeds_indices["instruct"][0] : cur_input_embeds_indices[
+                    #         "instruct"
+                    #     ][1],
+                    #     :,
+                    # ]
+                    image.append(cur_image)
+                    # instruct.append(cur_instruct)
+
+                new_image_input = []
+                max_image_len = max(cur_image.shape[0] for cur_image in image)
+                for cur_image in image:
+                    cur_len = cur_image.shape[0]
+                    new_image_input.append(
+                        torch.cat(
+                            [
+                                cur_image,
+                                torch.zeros(
+                                    (max_image_len - cur_len, cur_image.shape[1]),
+                                    dtype=cur_image.dtype,
+                                    device=cur_image.device,
+                                ),
+                            ],
+                            dim=0,
+                        )
+                    )
+
+                new_image_x = torch.stack(new_image_input, dim=0)
+
                 image_score_predictor_logit = self.image_score_predictor(
-                    hidden_states, input_embeds_indices, image_prev_decision
+                    new_image_x, image_prev_decision
                 ).reshape(B, -1, 2)
                 image_pred_score = F.log_softmax(image_score_predictor_logit, dim=-1)
                 if self.training:
