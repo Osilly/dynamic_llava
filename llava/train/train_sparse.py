@@ -139,10 +139,10 @@ class TrainingArguments(transformers.TrainingArguments):
     gumbel_start_tau: float = 1.0
     gumbel_end_tau: float = 0.1
 
-    output_text_len_for_training_step: List[int] = field(default_factory=lambda: [0])
-    output_text_len_for_training_decay: List[int] = field(default_factory=lambda: [50])
-    instruct_len_for_training_step: List[int] = field(default_factory=lambda: [0])
-    instruct_len_for_training_decay: List[int] = field(default_factory=lambda: [25])
+    # output_text_len_for_training_step: List[int] = field(default_factory=lambda: [0])
+    # output_text_len_for_training_decay: List[int] = field(default_factory=lambda: [50])
+    # instruct_len_for_training_step: List[int] = field(default_factory=lambda: [0])
+    # instruct_len_for_training_decay: List[int] = field(default_factory=lambda: [25])
     # output_text_keep_rate_step: int = 4000
     # instruct_keep_rate_step: int = 4000
     # ----------------------------------------------------------#
