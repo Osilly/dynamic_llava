@@ -15,6 +15,7 @@ from llava.constants import (
 from llava.conversation import conv_templates, SeparatorStyle
 
 from llava.model.builder import load_pretrained_model
+
 from llava.utils import disable_torch_init
 from llava.mm_utils import (
     tokenizer_image_token,
@@ -67,7 +68,7 @@ def eval_model(args):
     question_round_list = [[] for _ in range(len(datas[0]["conversations"]) // 2)]
     label_answer_round_list = [[] for _ in range(len(datas[0]["conversations"]) // 2)]
     for data in datas:
-        image_file_list.append(data["image"])
+        image_file_list.append(os.path.join(args.image_file, data["image"]))
         for i, line in enumerate(data["conversations"]):
             if line["from"] == "human":
                 question_round_list[i // 2].append(line["value"])
@@ -130,7 +131,7 @@ def eval_model(args):
         "without_model_memory": [],
     }
     with open(
-        "llava/eval/bench_test/long_text_bench/llava_long_text_mem_record.json",
+        args.result_file,
         "w",
         encoding="utf-8",
     ) as f:
@@ -329,7 +330,7 @@ def eval_model(args):
             record["max_memory"].append(max_memory)
             record["without_model_memory"].append(max_memory - model_memory)
             with open(
-                "llava/eval/bench_test/long_text_bench/llava_long_text_mem_record.json",
+                args.result_file,
                 "w",
                 encoding="utf-8",
             ) as f:
@@ -384,7 +385,8 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
     parser.add_argument("--model-base", type=str, default=None)
     parser.add_argument("--data-file", type=str, required=True)
-    # parser.add_argument("--image-file", type=str, required=True)
+    parser.add_argument("--image-file", type=str, required=True)
+    parser.add_argument("--result-file", type=str, required=True)
     # parser.add_argument("--query", type=str, required=True)
     parser.add_argument("--conv-mode", type=str, default=None)
     parser.add_argument("--sep", type=str, default=",")
