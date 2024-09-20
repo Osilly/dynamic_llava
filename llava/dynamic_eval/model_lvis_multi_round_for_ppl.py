@@ -37,7 +37,7 @@ special_text = {
 def forward_hook(forward_data, module, input, output):
     # print(f"Inside {module.__class__.__name__} forward")
     # forward_data["inputs"].append(input)
-    forward_data["outputs"].append((output[0, -1, 0] > output[0, -1, 1]).item())
+    forward_data["outputs"].append((output[:, :, 0] > output[:, :, 1]))
 
 
 def split_list(lst, n):
@@ -56,9 +56,14 @@ def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
+
+    torch.cuda.reset_max_memory_allocated()
+
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         model_path, args.model_base, model_name
     )
+    model_memory = torch.cuda.max_memory_allocated()
+    # print("model_memory: " + str(model_memory / (10**9)) + "G")
 
     # questions = json.load(open(os.path.expanduser(args.question_file), "r"))
     # questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
@@ -72,6 +77,13 @@ def eval_model(args):
     total_num = 0
     sum_ppl = 0.0
     sum_masked_answer_token_rate = 0.0
+
+    sum_total_token_length = 0
+    sum_instruct_token_length = 0
+    sum_output_token_length = 0
+    sum_output_cache_length = 0
+    # sum_max_prefill_memory = 0
+    sum_max_decode_memory = 0
 
     for i, line in enumerate(tqdm(questions)):
         idx = line["id"]
@@ -93,6 +105,16 @@ def eval_model(args):
         round_prompt_list = []
         round_answer_hard_decisions_list = []
         round_masked_answer_token_rate = []
+
+        total_token_length = 0
+        instruct_token_length = 0
+        output_token_length = 0
+        output_cache_length = 0
+        prefill_cache_length = 0
+
+        # max_prefill_memory = 0
+        max_decode_memory = 0
+
         for round, (question, label_answer) in enumerate(
             zip(question_list, label_answer_list)
         ):
@@ -130,11 +152,13 @@ def eval_model(args):
                 past_key_values = None
                 round_prompt_list.append(prompt)
             else:
-                prompt = "</s>" + "USER:" + question + "ASSISTANT:"
+                # prompt = "</s>" + "USER:" + question + "ASSISTANT:"
+                prompt = "USER:" + question + "ASSISTANT:"
                 input_ids = tokenizer.encode(prompt, return_tensors="pt")[:, 1:].cuda()
 
                 round_prompt_list.append(prompt)
 
+            label_answer += "</s>"
             label_ids = tokenizer(label_answer).input_ids[1:]
             answer_hard_decisions = None
             logits = []
@@ -158,6 +182,7 @@ def eval_model(args):
                 if j > 0:
                     images = None
                     image_sizes = None
+
                 with torch.inference_mode():
                     # outputs = model.generate(
                     #     input_ids,
@@ -171,15 +196,52 @@ def eval_model(args):
                     #     return_dict_in_generate=True,
                     #     past_key_values=past_key_values,
                     # )
+                    if j == 0:
+                        if images is not None:
+                            total_token_length += (
+                                images.shape[-2] * images.shape[-1] // 14 // 14
+                            )
+                        total_token_length += input_ids.shape[-1]
+                        instruct_token_length += input_ids.shape[-1]
+                    else:
+                        total_token_length += input_ids.shape[-1]
+                        output_token_length += input_ids.shape[-1]
                     outputs = model(
                         input_ids,
                         images=images,
                         image_sizes=image_sizes,
                         past_key_values=past_key_values,
                     )
+
+                past_key_values = outputs.past_key_values
+
+                if round == 0 and j == 0:
+                    prefill_cache_length = past_key_values[0][-1][0].shape[-2]
+                elif j == 0:
+                    prefill_cache_length += input_ids.shape[-1]
+
+                if j == 1:  # second output token
+                    torch.cuda.reset_max_memory_allocated()
+                    start_decode_memory = torch.cuda.max_memory_allocated()
+
+                if j == len(label_ids) - 1:
+                    torch.cuda.reset_max_memory_allocated()
+                    max_decode_memory += (
+                        torch.cuda.max_memory_allocated() - start_decode_memory
+                    )
+
+                if round == len(label_answer_list) - 1 and j == len(label_ids) - 1:
+                    # max_decode_memory = (
+                    #     torch.cuda.max_memory_allocated()
+                    #     - max_prefill_memory
+                    #     - model_memory
+                    # )
+                    output_cache_length = (
+                        past_key_values[0][-1][0].shape[-2] - prefill_cache_length
+                    )
+
                 # input_ids = torch.cat([input_ids, label_id.unsqueeze(0)], dim=1)
                 input_ids = label_id
-                past_key_values = outputs.past_key_values
 
                 # answer = tokenizer.batch_decode(
                 #     outputs.sequences[:, -1], skip_special_tokens=False
@@ -199,9 +261,11 @@ def eval_model(args):
 
                 # output token decision
                 if answer_hard_decisions is not None:
-                    answer_hard_decisions.append(forward_data["outputs"][0])
+                    answer_hard_decisions.append(
+                        forward_data["outputs"][0][0, 0].item()
+                    )
                 else:
-                    answer_hard_decisions = forward_data["outputs"]
+                    answer_hard_decisions = []
                 # if masked_input_ids is not None:
                 #     masked_input_ids = torch.cat(
                 #         [
@@ -247,6 +311,13 @@ def eval_model(args):
         sum_ppl += mean_round_ppl
         sum_masked_answer_token_rate += mean_round_masked_answer_token_rate
 
+        sum_total_token_length += total_token_length
+        sum_instruct_token_length += instruct_token_length
+        sum_output_token_length += output_token_length
+        sum_output_cache_length += output_cache_length
+        # sum_max_prefill_memory += max_prefill_memory
+        sum_max_decode_memory += max_decode_memory
+
         ans_id = shortuuid.uuid()
         ans_file.write(
             json.dumps(
@@ -257,15 +328,21 @@ def eval_model(args):
                     "answer_id": ans_id,
                     "model_id": model_name,
                     "metadata": {},
-                    "answer_hard_decisions": str(round_answer_hard_decisions_list),
+                    # "answer_hard_decisions": str(round_answer_hard_decisions_list),
                     # "answer_token_len": str(len(answer_hard_decisions) + 1),
                     # "masked_answer_token_len": str(masked_input_ids.shape[1]),
+                    "total_token_length": str(total_token_length),
+                    "instruct_token_length": str(instruct_token_length),
+                    "output_token_length": str(output_token_length),
+                    "output_cache_length": str(output_cache_length),
+                    # "max_prefill_memory": str(max_prefill_memory),
+                    "max_decode_memory": str(max_decode_memory),
                     "masked_answer_token_rate": str(round_masked_answer_token_rate),
                     # "masked_answer": masked_answer,
-                    "ppl": str(round_ppl_list),
                     "mean_round_masked_answer_token_rate": str(
                         mean_round_masked_answer_token_rate
                     ),
+                    "ppl": str(round_ppl_list),
                     "mean_round_ppl": str(mean_round_ppl),
                 }
             )
@@ -279,6 +356,14 @@ def eval_model(args):
     ans_file.write(
         json.dumps(
             {
+                "mean_total_token_length": str(sum_total_token_length / total_num),
+                "mean_instruct_token_length": str(
+                    sum_instruct_token_length / total_num
+                ),
+                "mean_output_token_length": str(sum_output_token_length / total_num),
+                "mean_output_cache_length": str(sum_output_cache_length / total_num),
+                # "mean_max_prefill_memory": str(sum_max_prefill_memory / total_num),
+                "mean_max_decode_memory": str(sum_max_decode_memory / total_num),
                 "mean_ppl": str(sum_ppl / total_num),
                 "mean_masked_answer_token_rate": str(
                     sum_masked_answer_token_rate / total_num
