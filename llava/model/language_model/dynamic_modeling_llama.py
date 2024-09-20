@@ -2047,6 +2047,7 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
         # ----------------------------------------------------------#
 
         for i, decoder_layer in enumerate(self.layers):
+            # ----------------------------------------------------------#
             # dynamic attention mask
             if use_cache:
                 past_key_values_length = past_key_values.get_usable_length(
@@ -2076,6 +2077,8 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     inputs_embeds,
                     past_key_values_length,
                 )
+            # ----------------------------------------------------------#
+
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
