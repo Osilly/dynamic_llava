@@ -12,6 +12,10 @@ dist
 
 # Data
 !**/alpaca-data-conversation.json
+llava/dynamic_eval/bench_test/nltk_data.zip
+llava/dynamic_eval/bench_test/nltk_data
+llava/eval/bench_test/nltk_data.zip
+llava/eval/bench_test/nltk_data
 
 # Editor
 .idea
