@@ -122,7 +122,6 @@ def eval_model(args):
     input_ids = torch.tensor([[1, -200, 1]]).cuda()
 
     # start = time.time()
-    torch.cuda.reset_max_memory_allocated()
     with torch.inference_mode():
         outputs = model.generate(
             input_ids,
@@ -135,10 +134,11 @@ def eval_model(args):
             use_cache=True,
             output_scores=True,
             return_dict_in_generate=True,
-            min_new_tokens=2,
-            max_new_tokens=2,
+            min_new_tokens=1,
+            max_new_tokens=1,
         )
 
+    torch.cuda.reset_max_memory_allocated()
     max_memory = torch.cuda.max_memory_allocated()
     print("max memory: " + str(max_memory))
     print("without model memory: " + str(max_memory - model_memory))
