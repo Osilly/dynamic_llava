@@ -252,6 +252,23 @@ class DynamicCachePlus(Cache):
 
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
+    # ----------------------------------------------------------#
+    def get_cache(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if len(self.key_cache) <= layer_idx:
+            return key_states, value_states
+        else:
+            return torch.cat(
+                [self.key_cache[layer_idx], key_states], dim=-2
+            ), torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
+
+    # ----------------------------------------------------------#
+
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""
         if len(self.key_cache) <= layer_idx:

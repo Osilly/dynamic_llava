@@ -1049,66 +1049,26 @@ class DynamicLlamaSdpaAttention(LlamaAttention):
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
 
-            # for output text reduce
-            # if text_decision is not None and not text_decision:
-            #     key_states, value_states = past_key_value.update(
-            #         key_states[:, :, 0:0, :],
-            #         value_states[:, :, 0:0, :],
-            #         self.layer_idx,
-            #         cache_kwargs,
-            #     )
-            # else:
-            #     key_states, value_states = past_key_value.update(
-            #         key_states, value_states, self.layer_idx, cache_kwargs
-            #     )
-
-            # if text_decision is not None:
-            #     if text_decision.shape[1] == 1:  # for output token
-            #         if not text_decision[0]:
-            #             key_states, value_states = past_key_value.update(
-            #                 key_states,
-            #                 value_states,
-            #                 self.layer_idx,
-            #                 cache_kwargs,
-            #                 text_decision,
-            #             )
-            #         else:
-            #             key_states, value_states = past_key_value.update(
-            #                 key_states, value_states, self.layer_idx, cache_kwargs
-            #             )
-            #     else:  # for new instruct
-            #         B, H, _, C = key_states.shape
-            #         expanded_decision = (
-            #             torch.tensor(text_decision)
-            #             .to(device=key_states.device)
-            #             .unsqueeze(0)
-            #             .unsqueeze(0)
-            #             .unsqueeze(-1)
-            #             .expand(
-            #                 B,
-            #                 H,
-            #                 -1,
-            #                 C,
-            #             )
-            #         )
-            #         keep_key_states = key_states[expanded_decision].view(B, H, -1, C)
-            #         keep_value_states = value_states[expanded_decision].view(
-            #             B, H, -1, C
-            #         )
-            #         key_states, value_states = past_key_value.update(
-            #             keep_key_states,
-            #             keep_value_states,
-            #             self.layer_idx,
-            #             cache_kwargs,
-            #         )
-            # else:
-            #     key_states, value_states = past_key_value.update(
-            #         key_states, value_states, self.layer_idx, cache_kwargs
-            #     )
             # ----------------------------------------------------------#
-            key_states, value_states = past_key_value.update(
+            # key_states, value_states = past_key_value.update(
+            #     key_states,
+            #     value_states,
+            #     self.layer_idx,
+            #     cache_kwargs,
+            #     text_decision,
+            # )
+            
+            # Fix one bug
+            temp_key_states, temp_value_states = key_states, value_states
+            key_states, value_states = past_key_value.get_cache(
                 key_states,
                 value_states,
+                self.layer_idx,
+                cache_kwargs,
+            )
+            _, _ = past_key_value.update(
+                temp_key_states,
+                temp_value_states,
                 self.layer_idx,
                 cache_kwargs,
                 text_decision,
@@ -2078,7 +2038,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     past_key_values_length,
                 )
             # ----------------------------------------------------------#
-
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
