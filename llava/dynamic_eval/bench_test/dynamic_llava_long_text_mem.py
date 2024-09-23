@@ -54,11 +54,15 @@ def eval_model(args):
     torch.cuda.reset_max_memory_allocated()
 
     tokenizer, model, image_processor, context_len = load_pretrained_model(
-        model_path, args.model_base, model_name
+        model_path,
+        args.model_base,
+        model_name,
+        load_8bit=args.load_8bit,
+        load_4bit=args.load_4bit,
     )
 
     model_memory = torch.cuda.max_memory_allocated()
-    print("model_memory: " + str(model_memory / (10**9)) + "G")
+    print("model_memory: " + str(model_memory / (1024**3)) + "G")
 
     # questions = json.load(open(os.path.expanduser(args.question_file), "r"))
     # questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
@@ -341,10 +345,10 @@ def eval_model(args):
                 print("total_token_length: " + str(total_token_length))
                 print("kv_cache_length: " + str(total_cache_length))
                 max_memory = torch.cuda.max_memory_allocated()
-                print("max_memory: " + str(max_memory / (10**9)) + "G")
+                print("max_memory: " + str(max_memory / (1024**3)) + "G")
                 print(
                     "without_model_memory (kv cache): "
-                    + str((max_memory - model_memory) / (10**9))
+                    + str((max_memory - model_memory) / (1024**3))
                     + "G"
                 )
                 print("#--------------------------------------------------#")
@@ -370,10 +374,10 @@ def eval_model(args):
     print("total_token_length: " + str(total_token_length))
     print("kv_cache_length: " + str(total_cache_length))
     max_memory = torch.cuda.max_memory_allocated()
-    print("max_memory: " + str(max_memory / (10**9)) + "G")
+    print("max_memory: " + str(max_memory / (1024**3)) + "G")
     print(
         "without_model_memory (kv cache): "
-        + str((max_memory - model_memory) / (10**9))
+        + str((max_memory - model_memory) / (1024**3))
         + "G"
     )
     print("#--------------------------------------------------#")
@@ -384,6 +388,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
     parser.add_argument("--model-base", type=str, default=None)
+    parser.add_argument("--load-8bit", action="store_true")
+    parser.add_argument("--load-4bit", action="store_true")
     parser.add_argument("--data-file", type=str, required=True)
     parser.add_argument("--image-file", type=str, required=True)
     parser.add_argument("--result-file", type=str, required=True)
