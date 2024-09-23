@@ -1057,22 +1057,30 @@ class DynamicLlamaSdpaAttention(LlamaAttention):
             #     cache_kwargs,
             #     text_decision,
             # )
-            
-            # Fix one bug
-            temp_key_states, temp_value_states = key_states, value_states
-            key_states, value_states = past_key_value.get_cache(
-                key_states,
-                value_states,
-                self.layer_idx,
-                cache_kwargs,
-            )
-            _, _ = past_key_value.update(
-                temp_key_states,
-                temp_value_states,
-                self.layer_idx,
-                cache_kwargs,
-                text_decision,
-            )
+
+            if text_decision is not None:
+                # Fix one bug
+                temp_key_states, temp_value_states = key_states, value_states
+                key_states, value_states = past_key_value.get_cache(
+                    key_states,
+                    value_states,
+                    self.layer_idx,
+                    cache_kwargs,
+                )
+                _, _ = past_key_value.update(
+                    temp_key_states,
+                    temp_value_states,
+                    self.layer_idx,
+                    cache_kwargs,
+                    text_decision,
+                )
+            else:
+                key_states, value_states = past_key_value.update(
+                    key_states,
+                    value_states,
+                    self.layer_idx,
+                    cache_kwargs,
+                )
             # ----------------------------------------------------------#
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
