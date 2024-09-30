@@ -142,6 +142,10 @@ def eval_model(args):
         json.dump(record, f, ensure_ascii=False, indent=4)
 
     # round_ppl_list = []
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
     for round, (question_batch_list, label_answer_batch_list) in enumerate(
         zip(question_round_list, label_answer_round_list)
     ):
@@ -317,12 +321,18 @@ def eval_model(args):
                     total_token_length += input_ids.shape[-1] - 1
                 else:
                     total_token_length += input_ids.shape[-1]
+
+                start_event.record()
                 outputs = model(
                     input_ids,
                     images=images,
                     # image_sizes=image_sizes,
                     past_key_values=past_key_values,
                 )
+                end_event.record()
+                torch.cuda.synchronize()
+                elapsed_time_ms = start_event.elapsed_time(end_event)
+                print(elapsed_time_ms)
             input_ids = label_id
             past_key_values = outputs.past_key_values
             total_cache_length = past_key_values[0][-1][0].shape[-2]

@@ -16,6 +16,7 @@ from llava.conversation import conv_templates, SeparatorStyle
 
 from llava.model.builder import load_pretrained_model
 
+# from llava.model.dynamic_llava_builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import (
     tokenizer_image_token,
@@ -124,15 +125,17 @@ def eval_model(args):
     else:
         args.conv_mode = conv_mode
 
-    total_token_length = 0
+    output_token_length = 0
     record = {
         "model_path": args.model_path,
         "batch_size": args.batch_size,
-        "total_token_length": [],
-        "kv_cache_length": [],
+        "output_token_length": [],
+        # "kv_cache_length": [],
         "model_memory": model_memory,
         "max_memory": [],
         "without_model_memory": [],
+        "cur_time": [],
+        "total_time": [],
     }
     with open(
         args.result_file,
@@ -146,6 +149,9 @@ def eval_model(args):
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
+    # input_embeds_indices = None
+    total_time = 0
+    total_input_ids = None
     for round, (question_batch_list, label_answer_batch_list) in enumerate(
         zip(question_round_list, label_answer_round_list)
     ):
@@ -307,42 +313,55 @@ def eval_model(args):
             input_ids = torch.cat([repeated_batches, extra_samples], dim=0)
             label_ids = torch.cat([repeated_labels, extra_labels], dim=0)
 
+        if total_input_ids is not None:
+            total_input_ids = torch.cat([total_input_ids, input_ids], dim=1)
+        else:
+            total_input_ids = input_ids
+
         for j in range(label_ids.shape[1]):
             label_id = label_ids[:, j : j + 1]
 
-            if j > 0:
-                images = None
-                # image_sizes = None
+            # if j > 0:
+            #     images = None
+            # image_sizes = None
             with torch.inference_mode():
-                if images is not None:
-                    total_token_length += (
-                        images.shape[-2] * images.shape[-1] // 14 // 14
-                    )
-                    total_token_length += input_ids.shape[-1] - 1
-                else:
-                    total_token_length += input_ids.shape[-1]
+                # if images is not None:
+                #     total_token_length += (
+                #         images.shape[-2] * images.shape[-1] // 14 // 14
+                #     )
+                #     total_token_length += input_ids.shape[-1] - 1
+                # else:
+                #     total_token_length += input_ids.shape[-1]
 
                 start_event.record()
                 outputs = model(
-                    input_ids,
+                    total_input_ids,
                     images=images,
                     # image_sizes=image_sizes,
                     past_key_values=past_key_values,
+                    # input_embeds_indices=input_embeds_indices,
+                    use_cache=False,
                 )
                 end_event.record()
                 torch.cuda.synchronize()
                 elapsed_time_ms = start_event.elapsed_time(end_event)
-                print(elapsed_time_ms)
-            input_ids = label_id
-            past_key_values = outputs.past_key_values
-            total_cache_length = past_key_values[-1][0].shape[-2]
+                total_time += elapsed_time_ms
+                # print(elapsed_time_ms)
+            # input_ids = label_id
+            total_input_ids = torch.cat([total_input_ids, label_id], dim=1)
+            output_token_length += label_id.shape[1]
+
+            # past_key_values = outputs.past_key_values
+            # total_cache_length = past_key_values[0][-1][0].shape[-2]
 
             # record
             max_memory = torch.cuda.max_memory_allocated()
-            record["total_token_length"].append(total_token_length)
-            record["kv_cache_length"].append(total_cache_length)
+            record["output_token_length"].append(output_token_length)
+            # record["kv_cache_length"].append(total_cache_length)
             record["max_memory"].append(max_memory)
             record["without_model_memory"].append(max_memory - model_memory)
+            record["cur_time"].append(elapsed_time_ms)
+            record["total_time"].append(total_time)
             with open(
                 args.result_file,
                 "w",
@@ -350,10 +369,10 @@ def eval_model(args):
             ) as f:
                 json.dump(record, f, ensure_ascii=False, indent=4)
 
-            if total_token_length % 100 == 0:
+            if output_token_length % 100 == 0:
                 print("\n#--------------------------------------------------#")
-                print("total_token_length: " + str(total_token_length))
-                print("kv_cache_length: " + str(total_cache_length))
+                print("output_token_length: " + str(output_token_length))
+                # print("kv_cache_length: " + str(total_cache_length))
                 max_memory = torch.cuda.max_memory_allocated()
                 print("max_memory: " + str(max_memory / (1024**3)) + "G")
                 print(
@@ -361,6 +380,7 @@ def eval_model(args):
                     + str((max_memory - model_memory) / (1024**3))
                     + "G"
                 )
+                print("total_time: " + str(total_time) + "ms")
                 print("#--------------------------------------------------#")
 
             # # ppl
@@ -381,8 +401,8 @@ def eval_model(args):
     # print("mean_ppl: " + str(mean_round_ppl))
 
     print("\n#--------------------------------------------------#")
-    print("total_token_length: " + str(total_token_length))
-    print("kv_cache_length: " + str(total_cache_length))
+    print("output_token_length: " + str(output_token_length))
+    # print("kv_cache_length: " + str(total_cache_length))
     max_memory = torch.cuda.max_memory_allocated()
     print("max_memory: " + str(max_memory / (1024**3)) + "G")
     print(
@@ -390,6 +410,7 @@ def eval_model(args):
         + str((max_memory - model_memory) / (1024**3))
         + "G"
     )
+    print("total_time: " + str(total_time) + "ms")
     print("#--------------------------------------------------#")
 
 
