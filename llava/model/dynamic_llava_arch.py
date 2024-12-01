@@ -32,8 +32,6 @@ from llava.constants import (
 
 from llava.mm_utils import get_anyres_image_grid_shape
 
-from .maskclip_hf.builder import build_maskclip
-
 
 special_text = {"ASSISTANT:": [319, 1799, 9047, 13566, 29901], "USER:": [11889, 29901]}
 
@@ -121,31 +119,6 @@ class DynamicLlavaMetaModel:
                 get_w(mm_projector_weights, "mm_projector")
             )
 
-    def get_maskclip(self):
-        maskclip = getattr(self, "maskclip", None)
-        llm_tokenizer = getattr(self, "llm_tokenizer", None)
-        return (
-            maskclip,
-            llm_tokenizer,
-        )
-
-    def initialize_maskclip(self, sparse_args, tokenizer, fsdp=None):
-        # self.maskclip_model, self.maskclip_preprocess = maskclip.load(
-        #     sparse_args.maskclip,
-        #     templates=None,
-        #     device=device,
-        # )
-        # full_negative_classes = list(
-        #     set(stuff_classes() + all_pascal_context_classes() + bg_classes())
-        # )
-        # self.full_negative_classes_names = [
-        #     "This is a photo of the " + class_name
-        #     for class_name in full_negative_classes
-        # ]
-        self.maskclip = build_maskclip(sparse_args.maskclip, sparse_args)
-        # self.maskclip.initialize_negative_text_embeds()
-        self.llm_tokenizer = tokenizer
-
 
 def unpad_image(tensor, original_size):
     """
@@ -187,9 +160,6 @@ class DynamicLlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    def get_maskclip(self):
-        return self.get_model().get_maskclip()
-
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
         image_features = self.get_model().mm_projector(image_features)
@@ -215,7 +185,7 @@ class DynamicLlavaMetaForCausalLM(ABC):
                 past_key_values,
                 None,
                 labels,
-            ), (None, None)
+            ), (None,)
 
         if type(images) is list or images.ndim == 5:
             if type(images) is list:
@@ -336,55 +306,11 @@ class DynamicLlavaMetaForCausalLM(ABC):
         input_embeds_indices = []
         cur_image_idx = 0
 
-        # new_system_embeds = []
-        # new_system_labels = []
-        # new_image_embeds = []
-        # new_image_labels = []
-        # new_instruct_embeds = []
-        # new_instruct_labels = []
-        # new_answer_embeds = []
-        # new_answer_labels = []
-
-        # ----------------------------------------------------------#
-        maskclip_mask = []
-        (
-            maskclip,
-            llm_tokenizer,
-        ) = self.get_maskclip()
-        # ----------------------------------------------------------#
-
         for batch_idx in range(len(input_ids)):
             cur_input_ids = input_ids[batch_idx]
             cur_labels = labels[batch_idx]
 
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
-
-            # # for parallel training
-            # if num_images == 0:
-            #     image_features[cur_image_idx] = torch.zeros_like(
-            #         image_features[cur_image_idx]
-            #     )
-            #     cur_input_ids = torch.cat(
-            #         [
-            #             cur_input_ids[:34],
-            #             torch.tensor([29871, IMAGE_TOKEN_INDEX, 29871]).to(
-            #                 device=cur_input_ids.device, dtype=cur_input_ids.dtype
-            #             ),
-            #             cur_input_ids[34:],
-            #         ],
-            #         dim=0,
-            #     )
-            #     cur_labels = torch.cat(
-            #         [
-            #             cur_labels[:34],
-            #             torch.tensor([IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX]).to(
-            #                 device=cur_labels.device, dtype=cur_labels.dtype
-            #             ),
-            #             cur_labels[34:],
-            #         ],
-            #         dim=0,
-            #     )
-            #     num_images = 1
 
             if num_images == 0:
                 cur_image_features = image_features[cur_image_idx]
@@ -405,12 +331,6 @@ class DynamicLlavaMetaForCausalLM(ABC):
                 0
             ].item()
             instruct_start_position = image_start_position + 1
-            # answer_start_position = (
-            #     instruct_start_position
-            #     + (cur_labels == IGNORE_INDEX).sum().item()
-            #     - image_start_position
-            #     - 1
-            # )
             answer_start_position = torch.where(cur_labels == -100)[0][-1].item() + 1
             # cur_image_len = cur_image_features.shape[0]
 
@@ -533,35 +453,6 @@ class DynamicLlavaMetaForCausalLM(ABC):
             else:
                 cur_last_instruct_start_position = 0
             # cur_last_instruct_end_position = special_assistant_starts[-1]
-
-            # if maskclip is not None:
-            #     maskclip.initialize_negative_text_embeds()
-
-            #     cur_last_instruct_ids = cur_instruct_ids[
-            #         cur_last_instruct_start_position:cur_last_instruct_end_position
-            #     ]
-
-            #     cur_postive_classes_names = [
-            #         llm_tokenizer.decode(
-            #             torch.cat([cur_last_instruct_ids, cur_answer_ids[:-1]])
-            #         )
-            #     ]
-
-            #     cur_maskclip_text_embeds = maskclip.get_full_text_embeds(
-            #         cur_postive_classes_names
-            #     )
-            #     cur_image = images[cur_image_idx - 1 : cur_image_idx]
-            #     if self.config.sparse_config["maskclip_distill_token_rate"] is not None:
-            #         k = int(
-            #             cur_image_embeds.shape[0]
-            #             * self.config.sparse_config["maskclip_distill_token_rate"]
-            #         )
-            #     else:
-            #         k = None
-
-            #     cur_maskclip_mask = maskclip(cur_maskclip_text_embeds, cur_image, k=k)
-
-            #     maskclip_mask.append(cur_maskclip_mask)
 
             # ----------------------------------------------------------#
 
@@ -687,9 +578,6 @@ class DynamicLlavaMetaForCausalLM(ABC):
 
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
 
-        if len(maskclip_mask):
-            maskclip_mask = torch.stack(maskclip_mask, dim=0)
-
         if _labels is None:
             new_labels = None
         else:
@@ -710,7 +598,7 @@ class DynamicLlavaMetaForCausalLM(ABC):
             past_key_values,
             new_input_embeds,
             new_labels,
-        ), (input_embeds_indices, maskclip_mask)
+        ), (input_embeds_indices,)
 
     # ----------------------------------------------------------#
 

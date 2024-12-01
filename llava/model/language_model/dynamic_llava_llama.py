@@ -80,7 +80,6 @@ class DynamicLlavaLlamaForCausalLM(
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
         input_embeds_indices: Optional[List[dict]] = None,
-        maskclip_mask: Optional[torch.IntTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
         if inputs_embeds is None:
@@ -91,10 +90,7 @@ class DynamicLlavaLlamaForCausalLM(
                 past_key_values,
                 inputs_embeds,
                 labels,
-            ), (
-                input_embeds_indices,
-                maskclip_mask,
-            ) = self.prepare_inputs_labels_for_multimodal(
+            ), (input_embeds_indices,) = self.prepare_inputs_labels_for_multimodal(
                 input_ids,
                 position_ids,
                 attention_mask,
@@ -116,7 +112,6 @@ class DynamicLlavaLlamaForCausalLM(
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             input_embeds_indices=input_embeds_indices,
-            maskclip_mask=maskclip_mask,
         )
 
     @torch.no_grad()
@@ -130,14 +125,12 @@ class DynamicLlavaLlamaForCausalLM(
         position_ids = kwargs.pop("position_ids", None)
         attention_mask = kwargs.pop("attention_mask", None)
         input_embeds_indices = kwargs.pop("input_embeds_indices", None)
-        maskclip_mask = kwargs.pop("maskclip_mask", None)
         if "inputs_embeds" in kwargs:
             raise NotImplementedError("`inputs_embeds` is not supported")
 
         if images is not None:
             (inputs, position_ids, attention_mask, _, inputs_embeds, _), (
                 input_embeds_indices,
-                maskclip_mask,
             ) = self.prepare_inputs_labels_for_multimodal(
                 inputs,
                 position_ids,
@@ -155,7 +148,6 @@ class DynamicLlavaLlamaForCausalLM(
             attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
             input_embeds_indices=input_embeds_indices,
-            maskclip_mask=maskclip_mask,
             **kwargs,
         )
 

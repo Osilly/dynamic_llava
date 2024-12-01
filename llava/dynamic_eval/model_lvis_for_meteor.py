@@ -27,6 +27,13 @@ from PIL import Image
 import math
 import torch.nn.functional as F
 
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.translate.meteor_score import single_meteor_score
+
+
+nltk.data.path.append("llava/dynamic_eval/bench_test/nltk_data")
+
 
 special_text = {
     "ASSISTANT:": [319, 1799, 9047, 13566, 29901],
@@ -59,6 +66,7 @@ def eval_model(args):
     )
 
     model_memory = torch.cuda.max_memory_allocated()
+
     questions = json.load(open(os.path.expanduser(args.question_file), "r"))
 
     answers_file = os.path.expanduser(args.answers_file)
@@ -66,7 +74,7 @@ def eval_model(args):
     ans_file = open(answers_file, "w")
 
     total_num = 0
-    sum_ppl = 0.0
+    sum_meteor = 0.0
     # sum_masked_answer_token_rate = 0.0
     sum_total_token_length = 0
     sum_instruct_token_length = 0
@@ -80,6 +88,7 @@ def eval_model(args):
         qs = line["question"].replace("<image>", "").strip()
         cur_prompt = qs
         label_answer = line["answer"].strip()
+        split_label_answer = word_tokenize(label_answer.lower())
 
         try:
             total_num += 1
@@ -117,8 +126,6 @@ def eval_model(args):
             .cuda()
         )
 
-        label_answer += "</s>"
-        label_ids = tokenizer(label_answer).input_ids[1:]
         past_key_values = None
         # answer_hard_decisions = None
         logits = []
@@ -133,13 +140,9 @@ def eval_model(args):
         max_prefill_memory = 0
         max_decode_memory = 0
 
-        for j, label_id in enumerate(label_ids):
-            label_id = (
-                torch.tensor([label_id])
-                .to(dtype=input_ids.dtype, device=input_ids.device)
-                .unsqueeze(0)
-            )
+        answer_ids = None
 
+        for j in range(args.max_new_tokens):
             if j > 0:
                 images = None
                 image_sizes = None
@@ -159,7 +162,15 @@ def eval_model(args):
                     image_sizes=image_sizes,
                     past_key_values=past_key_values,
                 )
-            input_ids = label_id
+
+            answer_id = torch.argmax(outputs.logits[0, -1:, :], dim=-1).unsqueeze(0)
+            input_ids = answer_id
+
+            if answer_ids is not None:
+                answer_ids = torch.cat([answer_ids, answer_id], dim=1)
+            else:
+                answer_ids = answer_id
+
             past_key_values = outputs.past_key_values
 
             if j == 0:
@@ -169,7 +180,10 @@ def eval_model(args):
                 torch.cuda.reset_max_memory_allocated()
                 max_prefill_memory = torch.cuda.max_memory_allocated() - model_memory
 
-            if j == len(label_ids) - 1:
+            if (
+                j == args.max_new_tokens - 1
+                or answer_id[0, 0] == special_text["</s>"][0]
+            ):
                 torch.cuda.reset_max_memory_allocated()
                 max_decode_memory = (
                     torch.cuda.max_memory_allocated()
@@ -180,16 +194,14 @@ def eval_model(args):
                     past_key_values[0][-1][0].shape[-2] - prefill_cache_length
                 )
 
-            # ppl
-            logit = outputs.logits[:, -1:, :]
-            logits.append(logit)
-            labels.append(label_id)
+            if answer_id[0, 0] == special_text["</s>"][0]:
+                break
 
-        logits = torch.cat(logits, dim=1).squeeze(0)
-        labels = torch.cat(labels, dim=1).squeeze(0)
-        log_probs = F.cross_entropy(logits, labels)
-        ppls = torch.exp(log_probs).item()
-        sum_ppl += ppls
+        answer = tokenizer.batch_decode(answer_ids, skip_special_tokens=True)[0].strip()
+        split_answer = word_tokenize(answer)
+
+        meteor = single_meteor_score(split_label_answer, split_answer)
+        sum_meteor += meteor
 
         sum_total_token_length += total_token_length
         sum_instruct_token_length += instruct_token_length
@@ -213,7 +225,7 @@ def eval_model(args):
                     "output_cache_length": str(output_cache_length),
                     "max_prefill_memory": str(max_prefill_memory),
                     "max_decode_memory": str(max_decode_memory),
-                    "ppl": str(ppls),
+                    "meteor": str(meteor),
                 }
             )
             + "\n"
@@ -231,7 +243,7 @@ def eval_model(args):
                 "mean_output_cache_length": str(sum_output_cache_length / total_num),
                 "mean_max_prefill_memory": str(sum_max_prefill_memory / total_num),
                 "mean_max_decode_memory": str(sum_max_decode_memory / total_num),
-                "mean_ppl": str(sum_ppl / total_num),
+                "mean_meteor": str(sum_meteor / total_num),
             }
         )
         + "\n"
@@ -239,7 +251,7 @@ def eval_model(args):
     ans_file.flush()
 
     ans_file.close()
-    print("mean_ppl: " + str(sum_ppl / total_num))
+    print("mean_meteor: " + str(sum_meteor / total_num))
 
 
 if __name__ == "__main__":
@@ -253,6 +265,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-chunks", type=int, default=1)
     parser.add_argument("--chunk-idx", type=int, default=0)
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--answer-prompter", action="store_true")
     parser.add_argument("--single-pred-prompt", action="store_true")
     args = parser.parse_args()

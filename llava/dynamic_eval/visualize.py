@@ -126,10 +126,8 @@ def eval_model(args):
     visualize_images_tensor = process_images(
         images, visualize_image_processor, model.config
     )
-    # 将 tensor 数据格式从 [1, 3, 336, 336] 转换为 [336, 336, 3]
     visualize_image = visualize_images_tensor.squeeze(0).permute(1, 2, 0)
 
-    # 创建 PIL Image
     visualize_image = Image.fromarray(visualize_image.numpy(), "RGB")
     visualize_image.save(os.path.join("llava/dynamic_eval", "visualize_image.png"))
 
@@ -153,16 +151,14 @@ def eval_model(args):
         )
 
     outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
-    print(outputs)
+    # print(outputs)
     hook.remove()
 
     hard_decision = 1 - forward_data["outputs"][0].argmax(dim=-1).cpu()
 
-    # 设置 patch 的尺寸
     patch_size = 14
-    num_patches_per_row = 336 // patch_size  # 每行有多少个 patches
+    num_patches_per_row = 336 // patch_size
 
-    # 重塑 tensor 以分割为单独的 patches
     patches = visualize_images_tensor.unfold(2, patch_size, patch_size).unfold(
         3, patch_size, patch_size
     )
@@ -171,27 +167,22 @@ def eval_model(args):
     )
     patches = patches.permute(0, 1, 2, 3, 4, 5).reshape(
         1, 3, -1, patch_size, patch_size
-    )  # 将 patches 摆正顺序
+    )
 
-    # 将 hard_decision 应用于 patches
-    hard_decision = hard_decision.squeeze()  # 去掉冗余的维度
+    hard_decision = hard_decision.squeeze()
 
-    # 将 mask 应用于 patches
     for i, decision in enumerate(hard_decision):
         if decision == 0:
-            patches[:, :, i, :, :] = 0  # 将对应的 patch 设置为黑色
+            patches[:, :, i, :, :] = 0
 
-    # 重构图像
     masked_image = patches.view(
         1, 3, num_patches_per_row, num_patches_per_row, patch_size, patch_size
     )
     masked_image = masked_image.permute(0, 1, 2, 4, 3, 5).reshape(1, 3, 336, 336)
 
-    # 确保我们有正确的数据形状和类型
     masked_image_np = masked_image.squeeze(0).permute(1, 2, 0).numpy()
-    masked_image_np = masked_image_np.astype("uint8")  # 确保类型为 uint8
+    masked_image_np = masked_image_np.astype("uint8")
 
-    # 使用 PIL 保存图像
     img = Image.fromarray(np.uint8(masked_image_np))
     img.save(os.path.join("llava/dynamic_eval", "masked_image.png"))
 

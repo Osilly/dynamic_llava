@@ -150,78 +150,95 @@ class DynamicCachePlus(Cache):
         else:
             # ----------------------------------------------------------#
             if cache_decision is not None:
-                cur_layer_key_cache_batch_list = []
-                cur_layer_value_cache_batch_list = []
-                for b in range(B):
-                    cur_keep_indice = cache_decision[b]
-                    keep_key_states = key_states[b, :, cur_keep_indice, :]  # H * N * C
-                    keep_value_states = value_states[
-                        b, :, cur_keep_indice, :
-                    ]  # H * N * C
-                    cur_layer_key_cache = torch.cat(
-                        [
-                            self.key_cache[layer_idx][
-                                b, :, : self.true_cache_length[layer_idx][b], :
-                            ],
-                            keep_key_states,
-                        ],
-                        dim=-2,
-                    )
-                    cur_layer_value_cache = torch.cat(
-                        [
-                            self.value_cache[layer_idx][
-                                b, :, : self.true_cache_length[layer_idx][b], :
-                            ],
-                            keep_value_states,
-                        ],
-                        dim=-2,
-                    )
-                    cur_layer_key_cache_batch_list.append(cur_layer_key_cache)
-                    cur_layer_value_cache_batch_list.append(cur_layer_value_cache)
+                if B == 1 and N == 1:
+                    if cache_decision[0, 0]:
+                        self.key_cache[layer_idx] = torch.cat(
+                            [self.key_cache[layer_idx], key_states], dim=-2
+                        )
+                        self.value_cache[layer_idx] = torch.cat(
+                            [self.value_cache[layer_idx], value_states], dim=-2
+                        )
 
-                    self.true_cache_length[layer_idx][b] += (
-                        cache_decision[b].sum().item()
-                    )
+                        self.true_cache_length[layer_idx] += N
+                    else:
+                        pass
+                else:  # TODO, efficiency needs to be optimized
+                    cur_layer_key_cache_batch_list = []
+                    cur_layer_value_cache_batch_list = []
+                    for b in range(B):
+                        cur_keep_indice = cache_decision[b]
+                        keep_key_states = key_states[
+                            b, :, cur_keep_indice, :
+                        ]  # H * N * C
+                        keep_value_states = value_states[
+                            b, :, cur_keep_indice, :
+                        ]  # H * N * C
+                        cur_layer_key_cache = torch.cat(
+                            [
+                                self.key_cache[layer_idx][
+                                    b, :, : self.true_cache_length[layer_idx][b], :
+                                ],
+                                keep_key_states,
+                            ],
+                            dim=-2,
+                        )
+                        cur_layer_value_cache = torch.cat(
+                            [
+                                self.value_cache[layer_idx][
+                                    b, :, : self.true_cache_length[layer_idx][b], :
+                                ],
+                                keep_value_states,
+                            ],
+                            dim=-2,
+                        )
+                        cur_layer_key_cache_batch_list.append(cur_layer_key_cache)
+                        cur_layer_value_cache_batch_list.append(cur_layer_value_cache)
 
-                max_cur_layer_kv_cache_length = max(
-                    cur_layer_key_cache_batch_list[b].shape[-2] for b in range(B)
-                )
-                for b in range(B):
-                    cur_len = cur_layer_key_cache_batch_list[b].shape[-2]
-                    cur_layer_key_cache_batch_list[b] = torch.cat(
-                        [
-                            cur_layer_key_cache_batch_list[b],
-                            torch.zeros(
-                                (
-                                    cur_layer_key_cache_batch_list[b].shape[0],
-                                    max_cur_layer_kv_cache_length - cur_len,
-                                    cur_layer_key_cache_batch_list[b].shape[-1],
-                                ),
-                                dtype=cur_layer_key_cache_batch_list[b].dtype,
-                                device=cur_layer_key_cache_batch_list[b].device,
-                            ),
-                        ],
-                        dim=-2,
+                        self.true_cache_length[layer_idx][b] += (
+                            cache_decision[b].sum().item()
+                        )
+
+                    max_cur_layer_kv_cache_length = max(
+                        cur_layer_key_cache_batch_list[b].shape[-2] for b in range(B)
                     )
-                    cur_layer_value_cache_batch_list[b] = torch.cat(
-                        [
-                            cur_layer_value_cache_batch_list[b],
-                            torch.zeros(
-                                (
-                                    cur_layer_value_cache_batch_list[b].shape[0],
-                                    max_cur_layer_kv_cache_length - cur_len,
-                                    cur_layer_value_cache_batch_list[b].shape[-1],
+                    for b in range(B):
+                        cur_len = cur_layer_key_cache_batch_list[b].shape[-2]
+                        cur_layer_key_cache_batch_list[b] = torch.cat(
+                            [
+                                cur_layer_key_cache_batch_list[b],
+                                torch.zeros(
+                                    (
+                                        cur_layer_key_cache_batch_list[b].shape[0],
+                                        max_cur_layer_kv_cache_length - cur_len,
+                                        cur_layer_key_cache_batch_list[b].shape[-1],
+                                    ),
+                                    dtype=cur_layer_key_cache_batch_list[b].dtype,
+                                    device=cur_layer_key_cache_batch_list[b].device,
                                 ),
-                                dtype=cur_layer_value_cache_batch_list[b].dtype,
-                                device=cur_layer_value_cache_batch_list[b].device,
-                            ),
-                        ],
-                        dim=-2,
+                            ],
+                            dim=-2,
+                        )
+                        cur_layer_value_cache_batch_list[b] = torch.cat(
+                            [
+                                cur_layer_value_cache_batch_list[b],
+                                torch.zeros(
+                                    (
+                                        cur_layer_value_cache_batch_list[b].shape[0],
+                                        max_cur_layer_kv_cache_length - cur_len,
+                                        cur_layer_value_cache_batch_list[b].shape[-1],
+                                    ),
+                                    dtype=cur_layer_value_cache_batch_list[b].dtype,
+                                    device=cur_layer_value_cache_batch_list[b].device,
+                                ),
+                            ],
+                            dim=-2,
+                        )
+                    self.key_cache[layer_idx] = torch.stack(
+                        cur_layer_key_cache_batch_list
                     )
-                self.key_cache[layer_idx] = torch.stack(cur_layer_key_cache_batch_list)
-                self.value_cache[layer_idx] = torch.stack(
-                    cur_layer_value_cache_batch_list
-                )
+                    self.value_cache[layer_idx] = torch.stack(
+                        cur_layer_value_cache_batch_list
+                    )
             else:
                 self.key_cache[layer_idx] = torch.cat(
                     [self.key_cache[layer_idx], key_states], dim=-2
@@ -234,6 +251,23 @@ class DynamicCachePlus(Cache):
             # ----------------------------------------------------------#
 
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
+
+    # ----------------------------------------------------------#
+    def get_cache(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if len(self.key_cache) <= layer_idx:
+            return key_states, value_states
+        else:
+            return torch.cat(
+                [self.key_cache[layer_idx], key_states], dim=-2
+            ), torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
+
+    # ----------------------------------------------------------#
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""

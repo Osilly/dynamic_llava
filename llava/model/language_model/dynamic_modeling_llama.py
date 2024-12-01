@@ -1049,80 +1049,44 @@ class DynamicLlamaSdpaAttention(LlamaAttention):
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
 
-            # for output text reduce
-            # if text_decision is not None and not text_decision:
-            #     key_states, value_states = past_key_value.update(
-            #         key_states[:, :, 0:0, :],
-            #         value_states[:, :, 0:0, :],
-            #         self.layer_idx,
-            #         cache_kwargs,
-            #     )
-            # else:
-            #     key_states, value_states = past_key_value.update(
-            #         key_states, value_states, self.layer_idx, cache_kwargs
-            #     )
-
-            # if text_decision is not None:
-            #     if text_decision.shape[1] == 1:  # for output token
-            #         if not text_decision[0]:
-            #             key_states, value_states = past_key_value.update(
-            #                 key_states,
-            #                 value_states,
-            #                 self.layer_idx,
-            #                 cache_kwargs,
-            #                 text_decision,
-            #             )
-            #         else:
-            #             key_states, value_states = past_key_value.update(
-            #                 key_states, value_states, self.layer_idx, cache_kwargs
-            #             )
-            #     else:  # for new instruct
-            #         B, H, _, C = key_states.shape
-            #         expanded_decision = (
-            #             torch.tensor(text_decision)
-            #             .to(device=key_states.device)
-            #             .unsqueeze(0)
-            #             .unsqueeze(0)
-            #             .unsqueeze(-1)
-            #             .expand(
-            #                 B,
-            #                 H,
-            #                 -1,
-            #                 C,
-            #             )
-            #         )
-            #         keep_key_states = key_states[expanded_decision].view(B, H, -1, C)
-            #         keep_value_states = value_states[expanded_decision].view(
-            #             B, H, -1, C
-            #         )
-            #         key_states, value_states = past_key_value.update(
-            #             keep_key_states,
-            #             keep_value_states,
-            #             self.layer_idx,
-            #             cache_kwargs,
-            #         )
-            # else:
-            #     key_states, value_states = past_key_value.update(
-            #         key_states, value_states, self.layer_idx, cache_kwargs
-            #     )
             # ----------------------------------------------------------#
-            key_states, value_states = past_key_value.update(
-                key_states,
-                value_states,
-                self.layer_idx,
-                cache_kwargs,
-                text_decision,
-            )
+            # key_states, value_states = past_key_value.update(
+            #     key_states,
+            #     value_states,
+            #     self.layer_idx,
+            #     cache_kwargs,
+            #     text_decision,
+            # )
+
+            if text_decision is not None:
+                # Fix one bug
+                temp_key_states, temp_value_states = key_states, value_states
+                key_states, value_states = past_key_value.get_cache(
+                    key_states,
+                    value_states,
+                    self.layer_idx,
+                    cache_kwargs,
+                )
+                _, _ = past_key_value.update(
+                    temp_key_states,
+                    temp_value_states,
+                    self.layer_idx,
+                    cache_kwargs,
+                    text_decision,
+                )
+            else:
+                key_states, value_states = past_key_value.update(
+                    key_states,
+                    value_states,
+                    self.layer_idx,
+                    cache_kwargs,
+                )
             # ----------------------------------------------------------#
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         if attention_mask is not None:
-            # if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-            #     raise ValueError(
-            #         f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-            #     )
             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
@@ -1168,8 +1132,10 @@ class DynamicLlamaSdpaAttention(LlamaAttention):
 LLAMA_ATTENTION_CLASSES = {
     "eager": LlamaAttention,
     "flash_attention_2": LlamaFlashAttention2,
+    # ----------------------------------------------------------#
     # "sdpa": LlamaSdpaAttention,
     "sdpa": DynamicLlamaSdpaAttention,
+    # ----------------------------------------------------------#
 }
 
 
@@ -1370,22 +1336,6 @@ class VisionPredictor(nn.Module):
                 for _ in range(self.num_layers)
             ]
         )
-        # self.transformer = nn.Sequential(
-        #     *[
-        #         CrossTransformerEncoderBlock(
-        #             dim=self.d_model,
-        #             num_heads=self.nhead,
-        #             mlp_ratio=self.dim_feedforward / self.d_model,
-        #         )
-        #         for _ in range(self.num_layers)
-        #     ]
-        # )
-        # encoder_layer = nn.TransformerEncoderLayer(
-        #     d_model=self.d_model,
-        #     nhead=self.nhead,
-        #     dim_feedforward=self.dim_feedforward,
-        # )
-        # self.transformer = nn.TransformerEncoder(encoder_layer, self.num_layers)
         self.output_mlp = nn.Sequential(
             nn.Linear(self.d_model, self.d_model // 2),
             nn.GELU(),
@@ -1395,79 +1345,9 @@ class VisionPredictor(nn.Module):
             # nn.LogSoftmax(dim=-1),
         )
 
-    def forward(self, x, input_embeds_indices, image_policy) -> torch.FloatTensor:
+    def forward(self, x, image_policy) -> torch.FloatTensor:
         predict = []
-        image = []
-        # instruct = []
-        image_len = (
-            input_embeds_indices[0]["image"][1] - input_embeds_indices[0]["image"][0]
-        )
-        for index in range(x.shape[0]):
-            cur_input_embeds_indices = input_embeds_indices[index]
-            cur_image = x[
-                index,
-                cur_input_embeds_indices["image"][0] : cur_input_embeds_indices[
-                    "image"
-                ][1],
-                :,
-            ]
-            # cur_instruct = x[
-            #     index,
-            #     cur_input_embeds_indices["instruct"][0] : cur_input_embeds_indices[
-            #         "instruct"
-            #     ][1],
-            #     :,
-            # ]
-            image.append(cur_image)
-            # instruct.append(cur_instruct)
-
-        new_image_input = []
-        max_image_len = max(cur_image.shape[0] for cur_image in image)
-        for cur_image in image:
-            cur_len = cur_image.shape[0]
-            new_image_input.append(
-                torch.cat(
-                    [
-                        cur_image,
-                        torch.zeros(
-                            (max_image_len - cur_len, cur_image.shape[1]),
-                            dtype=cur_image.dtype,
-                            device=cur_image.device,
-                        ),
-                    ],
-                    dim=0,
-                )
-            )
-
-        new_image_x = torch.stack(new_image_input, dim=0)
-        new_image_x = self.down_mlp(new_image_x)
-
-        # new_instruct_input = []
-        # max_instruct_len = max(cur_instruct.shape[0] for cur_instruct in instruct)
-        # for cur_instruct in instruct:
-        #     cur_len = cur_instruct.shape[0]
-        #     new_instruct_input.append(
-        #         torch.cat(
-        #             [
-        #                 cur_instruct,
-        #                 torch.zeros(
-        #                     (max_instruct_len - cur_len, cur_instruct.shape[1]),
-        #                     dtype=cur_instruct.dtype,
-        #                     device=cur_instruct.device,
-        #                 ),
-        #             ],
-        #             dim=0,
-        #         )
-        #     )
-
-        # new_instruct_x = torch.stack(new_instruct_input, dim=0)
-        # new_instruct_x = self.down_mlp(new_instruct_x)
-
-        # # q: image, kv: instruct
-        # new_x = self.transformer(
-        #     (new_image_x * image_policy, new_instruct_x, new_instruct_x)
-        # )[0]
-
+        new_image_x = self.down_mlp(x)
         new_x = self.transformer(new_image_x * image_policy)
         B, N, C = new_x.size()
         local_x = new_x[:, :, : C // 2]
@@ -1477,54 +1357,6 @@ class VisionPredictor(nn.Module):
         new_x = torch.cat([local_x, global_x.expand(B, N, C // 2)], dim=-1)
         predict = self.output_mlp(new_x)
         return predict
-
-
-# class OutputTextPredictor(nn.Module):
-#     def __init__(
-#         self,
-#         input_dim=4096,
-#         d_model=512,
-#         nhead=8,
-#         dim_feedforward=2048,
-#         num_layers=2,
-#     ):
-#         super().__init__()
-#         self.input_dim = input_dim
-#         self.d_model = d_model
-#         self.nhead = nhead
-#         self.dim_feedforward = dim_feedforward
-#         self.num_layers = num_layers
-
-#         self.down_mlp = nn.Sequential(
-#             nn.LayerNorm(self.input_dim),
-#             nn.Linear(self.input_dim, self.d_model),
-#             nn.GELU(),
-#         )
-#         self.transformer = nn.Sequential(
-#             *[
-#                 CrossTransformerEncoderBlock(
-#                     dim=self.d_model,
-#                     num_heads=self.nhead,
-#                     mlp_ratio=self.dim_feedforward / self.d_model,
-#                 )
-#                 for _ in range(self.num_layers)
-#             ]
-#         )
-#         self.output_mlp = nn.Sequential(
-#             nn.Linear(self.d_model, self.d_model // 2),
-#             nn.GELU(),
-#             nn.Linear(self.d_model // 2, self.d_model // 4),
-#             nn.GELU(),
-#             nn.Linear(self.d_model // 4, 2),
-#         )
-
-#     def forward(self, x, pre_x) -> torch.FloatTensor:
-#         # q: x, kv: pre_x
-#         new_x = self.down_mlp(x)
-#         new_pre_x = self.down_mlp(pre_x)
-#         new_x = self.transformer((new_x, new_pre_x, new_pre_x))[0]
-#         predict = self.output_mlp(new_x)
-#         return predict
 
 
 class TextPredictor(nn.Module):
@@ -1539,25 +1371,6 @@ class TextPredictor(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.d_model = d_model
-        # self.nhead = nhead
-        # self.dim_feedforward = dim_feedforward
-        # self.num_layers = num_layers
-
-        # self.down_mlp = nn.Sequential(
-        #     nn.LayerNorm(self.input_dim),
-        #     nn.Linear(self.input_dim, self.d_model),
-        #     nn.GELU(),
-        # )
-        # self.transformer = nn.Sequential(
-        #     *[
-        #         CrossTransformerEncoderBlock(
-        #             dim=self.d_model,
-        #             num_heads=self.nhead,
-        #             mlp_ratio=self.dim_feedforward / self.d_model,
-        #         )
-        #         for _ in range(self.num_layers)
-        #     ]
-        # )
         self.output_mlp = nn.Sequential(
             nn.LayerNorm(self.input_dim),
             nn.Linear(self.input_dim, self.d_model),
@@ -1570,10 +1383,6 @@ class TextPredictor(nn.Module):
         )
 
     def forward(self, x) -> torch.FloatTensor:
-        # q: x, kv: pre_x
-        # new_x = self.down_mlp(x)
-        # new_pre_x = self.down_mlp(pre_x)
-        # new_x = self.transformer((new_x, new_pre_x, new_pre_x))[0]
         predict = self.output_mlp(x)
         return predict
 
@@ -1600,25 +1409,6 @@ def ste_topk(logits: torch.Tensor, k: int, dim: int = -1):
     ).scatter_(dim, index, 1.0)
     ret = y_hard - y_soft.detach() + y_soft
     return ret
-
-
-# def batch_index_select(x, idx):
-#     if len(x.size()) == 3:
-#         B, N, C = x.size()
-#         N_new = idx.size(1)
-#         offset = torch.arange(B, dtype=torch.long, device=x.device).view(B, 1) * N
-#         idx = idx + offset
-#         out = x.reshape(B * N, C)[idx.reshape(-1)].reshape(B, N_new, C)
-#         return out
-#     elif len(x.size()) == 2:
-#         B, N = x.size()
-#         N_new = idx.size(1)
-#         offset = torch.arange(B, dtype=torch.long, device=x.device).view(B, 1) * N
-#         idx = idx + offset
-#         out = x.reshape(B * N)[idx.reshape(-1)].reshape(B, N_new)
-#         return out
-#     else:
-#         raise NotImplementedError
 
 
 @dataclass
@@ -1850,6 +1640,9 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
         self.gumbel_tau = 1.0
         # self.pre_answer = None
 
+        # for no kv cache
+        self.answer_indice = None
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1983,10 +1776,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                 input_embeds_indices[0]["image"][1]
                 - input_embeds_indices[0]["image"][0]
             )
-
-            # prev_decision = torch.ones(
-            #     B, init_n, 1, dtype=hidden_states.dtype, device=hidden_states.device
-            # )
             image_prev_decision = torch.ones(
                 B,
                 init_image_n,
@@ -1994,55 +1783,10 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
-
-        if (
-            self.config.sparse_config["use_text_predictor"]
-            and input_embeds_indices is not None
-            and hidden_states.shape[0] == len(input_embeds_indices)
-        ):
-            # padding answer
-            init_max_output_text_n = max(
-                input_embeds_indices[b]["answer"][1]
-                - input_embeds_indices[b]["answer"][0]
-                for b in range(B)
-            )
-            output_text_prev_decision = torch.ones(
-                B,
-                init_max_output_text_n,
-                1,
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-            for b in range(B):
-                output_text_prev_decision[
-                    b,
-                    input_embeds_indices[b]["answer"][1]
-                    - input_embeds_indices[b]["answer"][0] :,
-                    :,
-                ] = 0
-            # padding instruct
-            init_max_instruct_n = max(
-                input_embeds_indices[b]["last_instruct"][1]
-                - input_embeds_indices[b]["last_instruct"][0]
-                for b in range(B)
-            )
-            instruct_prev_decision = torch.ones(
-                B,
-                init_max_instruct_n,
-                1,
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-            for b in range(B):
-                instruct_prev_decision[
-                    b,
-                    input_embeds_indices[b]["last_instruct"][1]
-                    - input_embeds_indices[b]["last_instruct"][0] :,
-                    :,
-                ] = 0
         # ----------------------------------------------------------#
 
         for i, decoder_layer in enumerate(self.layers):
+            # ----------------------------------------------------------#
             # dynamic attention mask
             if use_cache:
                 past_key_values_length = past_key_values.get_usable_length(
@@ -2072,6 +1816,7 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     inputs_embeds,
                     past_key_values_length,
                 )
+            # ----------------------------------------------------------#
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -2084,8 +1829,40 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                 and input_embeds_indices is not None
                 and hidden_states.shape[0] == len(input_embeds_indices)
             ):
+                image = []
+                for index in range(hidden_states.shape[0]):
+                    cur_input_embeds_indices = input_embeds_indices[index]
+                    cur_image = hidden_states[
+                        index,
+                        cur_input_embeds_indices["image"][0] : cur_input_embeds_indices[
+                            "image"
+                        ][1],
+                        :,
+                    ]
+                    image.append(cur_image)
+
+                new_image_input = []
+                max_image_len = max(cur_image.shape[0] for cur_image in image)
+                for cur_image in image:
+                    cur_len = cur_image.shape[0]
+                    new_image_input.append(
+                        torch.cat(
+                            [
+                                cur_image,
+                                torch.zeros(
+                                    (max_image_len - cur_len, cur_image.shape[1]),
+                                    dtype=cur_image.dtype,
+                                    device=cur_image.device,
+                                ),
+                            ],
+                            dim=0,
+                        )
+                    )
+
+                new_image_x = torch.stack(new_image_input, dim=0)
+
                 image_score_predictor_logit = self.image_score_predictor(
-                    hidden_states, input_embeds_indices, image_prev_decision
+                    new_image_x, image_prev_decision
                 ).reshape(B, -1, 2)
                 image_pred_score = F.log_softmax(image_score_predictor_logit, dim=-1)
                 if self.training:
@@ -2117,171 +1894,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                         [left_policy, image_hard_keep_decision, right_policy], dim=1
                     )
                     image_prev_decision = image_hard_keep_decision
-
-                    # # token merging
-                    # with torch.no_grad():
-                    #     keep_index_batch_list = [
-                    #         torch.nonzero(
-                    #             image_hard_keep_decision[b, :, 0] == 1, as_tuple=False
-                    #         )
-                    #         for b in range(B)
-                    #     ]
-                    #     unkeep_index_batch_list = [
-                    #         torch.nonzero(
-                    #             image_hard_keep_decision[b, :, 0] == 0, as_tuple=False
-                    #         )
-                    #         for b in range(B)
-                    #     ]
-
-                    # image_hidden_states = hidden_states[
-                    #     :,
-                    #     input_embeds_indices[0]["image"][0] : input_embeds_indices[0][
-                    #         "image"
-                    #     ][1],
-                    #     :,
-                    # ]
-                    # keep_image_hidden_states_batch_list = [
-                    #     image_hidden_states[b]
-                    #     .clone()
-                    #     .gather(
-                    #         dim=0,
-                    #         index=keep_index_batch_list[b].expand(
-                    #             -1,
-                    #             image_hidden_states.shape[2],
-                    #         ),
-                    #     )
-                    #     for b in range(B)
-                    # ]
-                    # unkeep_image_hidden_states_batch_list = [
-                    #     image_hidden_states[b]
-                    #     .clone()
-                    #     .gather(
-                    #         dim=0,
-                    #         index=unkeep_index_batch_list[b].expand(
-                    #             -1,
-                    #             image_hidden_states.shape[2],
-                    #         ),
-                    #     )
-                    #     for b in range(B)
-                    # ]
-                    # with torch.no_grad():
-                    #     keep_image_hidden_states_norm_batch_list = [
-                    #         (
-                    #             keep_image_hidden_states_batch_list[b]
-                    #             / keep_image_hidden_states_batch_list[b].norm(
-                    #                 dim=-1, keepdim=True
-                    #             )
-                    #         )
-                    #         for b in range(B)
-                    #     ]
-                    #     unkeep_image_hidden_states_norm_batch_list = [
-                    #         (
-                    #             unkeep_image_hidden_states_batch_list[b]
-                    #             / unkeep_image_hidden_states_batch_list[b].norm(
-                    #                 dim=-1, keepdim=True
-                    #             )
-                    #         )
-                    #         for b in range(B)
-                    #     ]
-                    #     scores_batch_list = [
-                    #         (
-                    #             unkeep_image_hidden_states_norm_batch_list[b]
-                    #             @ keep_image_hidden_states_norm_batch_list[b].transpose(
-                    #                 -1, -2
-                    #             )
-                    #         )
-                    #         for b in range(B)
-                    #     ]
-                    #     node_idx_batch_list = [
-                    #         scores_batch_list[b].max(dim=-1)[1] for b in range(B)
-                    #     ]
-                    #     merge_unselect_node_index_batch_list = [
-                    #         node_idx_batch_list[b][..., None] for b in range(B)
-                    #     ]
-
-                    # for b in range(B):
-                    #     cur_keep_image_hidden_states = (
-                    #         keep_image_hidden_states_batch_list[b]
-                    #     )
-                    #     cur_unkeep_image_hidden_states = (
-                    #         unkeep_image_hidden_states_batch_list[b]
-                    #     )
-                    #     cur_merge_unselect_node_index = (
-                    #         merge_unselect_node_index_batch_list[b]
-                    #     )
-
-                    #     temp = torch.zeros_like(cur_keep_image_hidden_states)
-                    #     size = torch.ones_like(cur_unkeep_image_hidden_states)
-                    #     size = temp.scatter_add(
-                    #         dim=0,
-                    #         index=cur_merge_unselect_node_index.expand(
-                    #             -1,
-                    #             cur_unkeep_image_hidden_states.shape[-1],
-                    #         ),
-                    #         src=size,
-                    #     )
-                    #     cur_merge_unkeep_image_hidden_states = temp.scatter_add(
-                    #         dim=0,
-                    #         index=cur_merge_unselect_node_index.expand(
-                    #             -1,
-                    #             cur_unkeep_image_hidden_states.shape[-1],
-                    #         ),
-                    #         src=cur_unkeep_image_hidden_states,
-                    #     )
-                    #     cur_reduced_merge_unkeep_image_hidden_states = (
-                    #         cur_merge_unkeep_image_hidden_states / size.clamp(min=1)
-                    #     )
-                    #     cur_keep_image_hidden_states = (
-                    #         cur_keep_image_hidden_states
-                    #         + cur_reduced_merge_unkeep_image_hidden_states
-                    #     )
-                    #     # reverse to original hidden states
-                    #     image_hidden_states[b] = (
-                    #         image_hidden_states[b]
-                    #         .clone()
-                    #         .scatter(
-                    #             dim=0,
-                    #             index=keep_index_batch_list[b].expand(
-                    #                 -1, cur_keep_image_hidden_states.shape[-1]
-                    #             ),
-                    #             src=cur_keep_image_hidden_states,
-                    #         )
-                    #     )
-
-                    # keep_state = keep_image_hidden_states_batch_list[b]
-
-                    # unkeep_state = unkeep_image_hidden_states_batch_list[b]
-                    # indices = merge_unselect_node_index_batch_list[
-                    #     b
-                    # ].squeeze()  # 移除多余的维度
-
-                    # # 创建一个结果张量，初始化为0
-                    # result_tensor = torch.zeros_like(keep_state)
-
-                    # # 对于每个索引，聚合并计算平均
-                    # unique_indices, counts = indices.unique(return_counts=True)
-                    # for idx, count in zip(unique_indices, counts):
-                    #     # 获取所有匹配当前索引的位置
-                    #     mask = indices == idx
-                    #     # 聚合这些位置的向量
-                    #     result_tensor[idx] = unkeep_state[mask].sum(0) / count
-
-                    # keep_state = keep_state + result_tensor
-                    # # reverse to original hidden states
-                    # image_hidden_states[b] = (
-                    #     image_hidden_states[b]
-                    #     .clone()
-                    #     .scatter(
-                    #         dim=0,
-                    #         index=keep_index_batch_list[b].expand(
-                    #             -1, keep_state.shape[-1]
-                    #         ),
-                    #         src=keep_state,
-                    #     )
-                    # )
-
-                    if self.config.sparse_config["maskclip"] is not None:
-                        image_score_predictor_logits.append(image_score_predictor_logit)
                 else:
                     image_score = image_pred_score[:, :, 0]
                     num_keep_node = int(
@@ -2328,86 +1940,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                             image_hidden_states.shape[2],
                         ),
                     )
-                    # unkeep_image_hidden_states = image_hidden_states.gather(
-                    #     dim=1,
-                    #     index=unkeep_index[..., None].expand(
-                    #         image_hidden_states.shape[0],
-                    #         init_image_n - num_keep_node,
-                    #         image_hidden_states.shape[2],
-                    #     ),
-                    # )
-
-                    # # token merging
-                    # with torch.no_grad():
-                    #     keep_image_hidden_states_norm = (
-                    #         keep_image_hidden_states
-                    #         / keep_image_hidden_states.norm(dim=-1, keepdim=True)
-                    #     )
-                    #     unkeep_image_hidden_states_norm = (
-                    #         unkeep_image_hidden_states
-                    #         / unkeep_image_hidden_states.norm(dim=-1, keepdim=True)
-                    #     )
-                    #     scores = (
-                    #         unkeep_image_hidden_states_norm
-                    #         @ keep_image_hidden_states_norm.transpose(-1, -2)
-                    #     )
-                    #     node_max, node_idx = scores.max(dim=-1)
-                    #     merge_unselect_node_index = node_idx[..., None]
-
-                    # temps = torch.zeros_like(keep_image_hidden_states)
-                    # sizes = torch.ones_like(unkeep_image_hidden_states)
-                    # sizes = temps.scatter_add(
-                    #     dim=1,
-                    #     index=merge_unselect_node_index.expand(
-                    #         -1,
-                    #         -1,
-                    #         unkeep_image_hidden_states.shape[2],
-                    #     ),
-                    #     src=sizes,
-                    # )
-                    # merge_unkeep_image_hidden_states = temps.scatter_add(
-                    #     dim=1,
-                    #     index=merge_unselect_node_index.expand(
-                    #         -1,
-                    #         -1,
-                    #         unkeep_image_hidden_states.shape[2],
-                    #     ),
-                    #     src=unkeep_image_hidden_states,
-                    # )
-                    # reduced_merge_unkeep_image_hidden_states = (
-                    #     merge_unkeep_image_hidden_states / sizes.clamp(min=1)
-                    # )
-                    # keep_image_hidden_states = (
-                    #     keep_image_hidden_states
-                    #     + reduced_merge_unkeep_image_hidden_states
-                    # )
-
-                    # for b in range(B):
-                    #     keep_state = keep_image_hidden_states[b]
-
-                    #     unkeep_state = unkeep_image_hidden_states[b]
-                    #     indices = merge_unselect_node_index[
-                    #         b
-                    #     ].squeeze()  # 移除多余的维度
-
-                    #     # 创建一个结果张量，初始化为0
-                    #     result_tensor = torch.zeros_like(keep_state)
-
-                    #     # 对于每个索引，聚合并计算平均
-                    #     unique_indices, counts = indices.unique(return_counts=True)
-                    #     for idx, count in zip(unique_indices, counts):
-                    #         # 获取所有匹配当前索引的位置
-                    #         mask = indices == idx
-                    #         # 聚合这些位置的向量
-                    #         result_tensor[idx] = unkeep_state[mask].sum(0) / count
-
-                    #     keep_state = keep_state + result_tensor
-                    #     # reverse to original hidden states
-                    #     image_hidden_states[b] = image_hidden_states[b].scatter(
-                    #         dim=0,
-                    #         index=keep_index[b].expand(-1, keep_state.shape[-1]),
-                    #         src=keep_state,
-                    #     )
 
                     hidden_states = torch.cat(
                         [
@@ -2469,40 +2001,31 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     and hidden_states.shape[0] == len(input_embeds_indices)
                     and self.training
                 ):
-                    # # padding pre answer
-                    # pre_answer_batch_list = [
-                    #     hidden_states[b][: input_embeds_indices[b]["answer"][0], :]
-                    #     for b in range(B)
-                    # ]
-
-                    # padded_pre_answer = []
-                    # max_pre_answer_len = max(
-                    #     input_embeds_indices[b]["answer"][0] for b in range(B)
-                    # )
-                    # for cur_pre_answer in pre_answer_batch_list:
-                    #     cur_len = cur_pre_answer.shape[0]
-                    #     padded_pre_answer.append(
-                    #         torch.cat(
-                    #             [
-                    #                 cur_pre_answer,
-                    #                 torch.zeros(
-                    #                     (
-                    #                         max_pre_answer_len - cur_len,
-                    #                         cur_pre_answer.shape[1],
-                    #                     ),
-                    #                     dtype=cur_pre_answer.dtype,
-                    #                     device=cur_pre_answer.device,
-                    #                 ),
-                    #             ],
-                    #             dim=0,
-                    #         )
-                    #     )
-
-                    # padded_pre_answer = torch.stack(padded_pre_answer, dim=0)
 
                     # for output token
                     if self.config.sparse_config["use_output_text_predictor"]:
+
                         # padding answer
+                        init_max_output_text_n = max(
+                            input_embeds_indices[b]["answer"][1]
+                            - input_embeds_indices[b]["answer"][0]
+                            for b in range(B)
+                        )
+                        output_text_prev_decision = torch.ones(
+                            B,
+                            init_max_output_text_n,
+                            1,
+                            dtype=hidden_states.dtype,
+                            device=hidden_states.device,
+                        )
+                        for b in range(B):
+                            output_text_prev_decision[
+                                b,
+                                input_embeds_indices[b]["answer"][1]
+                                - input_embeds_indices[b]["answer"][0] :,
+                                :,
+                            ] = 0
+
                         answer_batch_list = [
                             hidden_states[b][
                                 input_embeds_indices[b]["answer"][
@@ -2539,12 +2062,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                             )
 
                         padded_answer = torch.stack(padded_answer, dim=0)
-
-                        # padded_output_text_score_predictor_logit = (
-                        #     self.output_text_score_predictor(padded_answer).reshape(
-                        #         B, -1, 2
-                        #     )
-                        # )
                         padded_output_text_score_predictor_logit = (
                             self.output_text_score_predictor(padded_answer).reshape(
                                 B, -1, 2
@@ -2617,6 +2134,26 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     # for instruct token
                     if self.config.sparse_config["use_instruct_predictor"]:
                         # padding instruct
+                        init_max_instruct_n = max(
+                            input_embeds_indices[b]["last_instruct"][1]
+                            - input_embeds_indices[b]["last_instruct"][0]
+                            for b in range(B)
+                        )
+                        instruct_prev_decision = torch.ones(
+                            B,
+                            init_max_instruct_n,
+                            1,
+                            dtype=hidden_states.dtype,
+                            device=hidden_states.device,
+                        )
+                        for b in range(B):
+                            instruct_prev_decision[
+                                b,
+                                input_embeds_indices[b]["last_instruct"][1]
+                                - input_embeds_indices[b]["last_instruct"][0] :,
+                                :,
+                            ] = 0
+
                         instruct_batch_list = [
                             hidden_states[b][
                                 input_embeds_indices[b]["last_instruct"][
@@ -2654,11 +2191,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
 
                         padded_instruct = torch.stack(padded_instruct, dim=0)
 
-                        # padded_instruct_score_predictor_logit = (
-                        #     self.instruct_score_predictor(padded_instruct).reshape(
-                        #         B, -1, 2
-                        #     )
-                        # )
                         padded_instruct_score_predictor_logit = (
                             self.instruct_score_predictor(padded_instruct).reshape(
                                 B, -1, 2
@@ -2746,12 +2278,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     instruct_score_predictor_logit = self.instruct_score_predictor(
                         instruct_hidden_states
                     ).reshape(B, -1, 2)
-                    # # batch > 1
-                    # indices = torch.where(
-                    #     instruct_score_predictor_logit[:, :, 0]
-                    #     > instruct_score_predictor_logit[:, :, 1]
-                    # )
-                    # keep_index = indices[1][indices[0] == 0]
 
                     indices = torch.where(
                         instruct_score_predictor_logit[0, :, 0]
@@ -2788,9 +2314,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
 
                     # for position
                     if position_ids is not None:
-                        # keep_index_for_instruct_position = (
-                        #     keep_index + input_embeds_indices[0]["last_instruct"][0]
-                        # ).to(dtype=position_ids.dtype, device=position_ids.device)
                         keep_index_for_instruct_position = position_ids[
                             :,
                             input_embeds_indices[0]["last_instruct"][
@@ -2812,23 +2335,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                             ],
                             dim=1,
                         )
-                        # instrcut_position_ids = position_ids[
-                        #     :,
-                        #     input_embeds_indices[0]["last_instruct"][
-                        #         0
-                        #     ] : input_embeds_indices[0]["last_instruct"][1]
-                        #     - 1,
-                        # ]
-                        # instrcut_position_ids = instrcut_position_ids.gather(
-                        #     dim=1, index=keep_index
-                        # )
-                        # position_ids[
-                        #     :,
-                        #     input_embeds_indices[0]["last_instruct"][
-                        #         0
-                        #     ] : input_embeds_indices[0]["last_instruct"][1]
-                        #     - 1,
-                        # ] = instrcut_position_ids
 
                     else:
                         keep_index_for_instruct_position = (
@@ -2874,11 +2380,8 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     # and self.pre_answer is not None
                     and hidden_states.shape[1] == 1
                     and self.config.sparse_config["use_output_text_predictor"]
-                ):  # output infer stage
+                ):  # output infer stage, with KV cache
                     # assert B == 1, "Using text predictor must keep the batch size to 1"
-                    # text_score_predictor_logit = self.output_text_score_predictor(
-                    #     hidden_states
-                    # ).reshape(B, -1, 2)
                     text_score_predictor_logit = self.output_text_score_predictor(
                         hidden_states
                     ).reshape(B, -1, 2)
@@ -2887,7 +2390,119 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                         > text_score_predictor_logit[:, :, 1]
                     )
 
-                    # self.pre_answer = torch.cat([self.pre_answer, hidden_states], dim=1)
+                elif (
+                    not self.training
+                    # and past_key_values_length
+                    and input_embeds_indices is not None
+                    and hidden_states.shape[0] == len(input_embeds_indices)
+                    # and hidden_states.shape[1] == 1
+                    and self.config.sparse_config["use_output_text_predictor"]
+                    and not use_cache
+                ):  # output infer stage, without KV cache
+                    if self.answer_indice is None:
+                        self.answer_indice = input_embeds_indices[0]["instruct"][1]
+                    # all output token length is same
+                    output_text_hidden_states = hidden_states[
+                        :,
+                        self.answer_indice : -1,
+                        :,
+                    ]
+
+                    text_score_predictor_logit = self.output_text_score_predictor(
+                        output_text_hidden_states
+                    ).reshape(B, -1, 2)
+                    text_decision = (
+                        text_score_predictor_logit[:, :, 0]
+                        > text_score_predictor_logit[:, :, 1]
+                    )
+                    num_keep_node = text_decision.sum(dim=1).max()
+                    text_score = text_score_predictor_logit[:, :, 0]
+
+                    keep_index, _ = torch.sort(
+                        torch.argsort(text_score, dim=1, descending=True)[
+                            :, :num_keep_node
+                        ],
+                        dim=1,
+                        descending=False,
+                    )
+
+                    left_hidden_states = hidden_states[
+                        :,
+                        : self.answer_indice,
+                        :,
+                    ]
+                    right_hidden_states = hidden_states[
+                        :,
+                        -1:,
+                        :,
+                    ]
+
+                    keep_output_text_hidden_states = output_text_hidden_states.gather(
+                        dim=1,
+                        index=keep_index[..., None].expand(
+                            output_text_hidden_states.shape[0],
+                            num_keep_node,
+                            output_text_hidden_states.shape[2],
+                        ),
+                    )
+
+                    hidden_states = torch.cat(
+                        [
+                            left_hidden_states,
+                            keep_output_text_hidden_states,
+                            right_hidden_states,
+                        ],
+                        dim=1,
+                    )
+                    policy = None
+
+                    # for position
+                    if position_ids is not None:
+                        keep_index_for_output_text_position = position_ids[
+                            :,
+                            self.answer_indice : -1,
+                        ].gather(dim=1, index=keep_index)
+                        keep_index_for_left_position = position_ids[
+                            :, : self.answer_indice
+                        ]
+                        keep_index_for_right_position = position_ids[:, -1:]
+                        position_ids = torch.cat(
+                            [
+                                keep_index_for_left_position,
+                                keep_index_for_output_text_position,
+                                keep_index_for_right_position,
+                            ],
+                            dim=1,
+                        )
+
+                    else:
+                        keep_index_for_output_text_position = (
+                            keep_index + self.answer_indice
+                        ).to(dtype=position_ids.dtype, device=position_ids.device)
+                        keep_index_for_left_position = (
+                            torch.arange(0, self.answer_indice)
+                            .repeat(B, 1)
+                            .to(dtype=position_ids.dtype, device=position_ids.device)
+                        )
+                        keep_index_for_right_position = (
+                            torch.arange(init_n - 1, init_n)
+                            .repeat(B, 1)
+                            .to(dtype=position_ids.dtype, device=position_ids.device)
+                        )
+                        position_ids = torch.cat(
+                            [
+                                keep_index_for_left_position,
+                                keep_index_for_output_text_position,
+                                keep_index_for_right_position,
+                            ],
+                            dim=1,
+                        )
+
+                    # for input_embeds_indices
+                    num_unkeep_node = (
+                        init_n - 1 - self.answer_indice - keep_index.shape[1]
+                    )
+
                 elif (
                     not self.training
                     and past_key_values_length
@@ -2896,10 +2511,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                     and self.config.sparse_config["use_instruct_predictor"]
                 ):  # for new instrct
                     # assert B == 1, "Using text predictor must keep the batch size to 1"
-                    # self.pre_answer = torch.cat([self.pre_answer, hidden_states], dim=1)
-                    # text_score_predictor_logit = self.instruct_score_predictor(
-                    #     hidden_states
-                    # ).reshape(B, -1, 2)
                     text_score_predictor_logit = self.instruct_score_predictor(
                         hidden_states
                     ).reshape(B, -1, 2)
@@ -2908,9 +2519,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                         > text_score_predictor_logit[:, :, 1]
                     )
                     text_decision[:, -1:] = True
-                    # # new instruct template, "USER: **** ASSISTANT:"
-                    # text_decision[:2] = True
-                    # text_decision[-5:] = True
 
                 # else:
                 #     assert False, "text predictor does not work"
@@ -2967,9 +2575,7 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
                 if use_legacy_cache
                 else next_decoder_cache
             )
-            # # ----------------------------------------------------------#
-            # next_true_cache_length = next_decoder_cache.true_cache_length
-            # # ----------------------------------------------------------#
+
         if not return_dict:
             return tuple(
                 v
@@ -2979,7 +2585,6 @@ class DynamicLlamaModel(DynamicLlamaPreTrainedModel):
         return DynamicModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
-            # true_cache_length=next_true_cache_length,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
             image_masks=image_masks,
@@ -3036,7 +2641,6 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         input_embeds_indices: Optional[List[dict]] = None,
-        maskclip_mask: Optional[torch.IntTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -3143,24 +2747,6 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
             ):
                 output_text_mask_loss = 0.0
                 for mask_batch_list in outputs.output_text_masks_batch_list:
-                    # batch_ratio_batch_list = [
-                    #     mask.mean()
-                    #     for mask in mask_batch_list
-                    #     if mask.shape[0]
-                    #     >= self.config.sparse_config["output_text_len_for_training"]
-                    # ]
-                    # if len(batch_ratio_batch_list):
-                    #     batch_ratio = torch.stack(batch_ratio_batch_list)
-                    #     output_text_mask_loss = (
-                    #         output_text_mask_loss
-                    #         + (
-                    #             (
-                    #                 self.config.sparse_config["output_text_keep_rate"]
-                    #                 - batch_ratio
-                    #             )
-                    #             ** 2
-                    #         ).mean()
-                    #     )
                     batch_ratio = torch.stack([mask.mean() for mask in mask_batch_list])
                     target_batch_ratio = torch.tensor(
                         [
@@ -3190,24 +2776,6 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
             ):
                 instruct_mask_loss = 0.0
                 for mask_batch_list in outputs.instruct_masks_batch_list:
-                    # batch_ratio_batch_list = [
-                    #     mask.mean()
-                    #     for mask in mask_batch_list
-                    #     if mask.shape[0]
-                    #     >= self.config.sparse_config["output_text_len_for_training"]
-                    # ]
-                    # if len(batch_ratio_batch_list):
-                    #     batch_ratio = torch.stack(batch_ratio_batch_list)
-                    #     output_text_mask_loss = (
-                    #         output_text_mask_loss
-                    #         + (
-                    #             (
-                    #                 self.config.sparse_config["output_text_keep_rate"]
-                    #                 - batch_ratio
-                    #             )
-                    #             ** 2
-                    #         ).mean()
-                    #     )
                     batch_ratio = torch.stack([mask.mean() for mask in mask_batch_list])
                     target_batch_ratio = torch.tensor(
                         [
@@ -3229,58 +2797,6 @@ class DynamicLlamaForCausalLM(DynamicLlamaPreTrainedModel):
                 loss = (
                     loss
                     + self.config.sparse_config["mask_loss_weight"] * instruct_mask_loss
-                )
-            # ----------------------------------------------------------#
-
-            # # ----------------------------------------------------------#
-            # if maskclip_mask is not None and len(maskclip_mask):
-            #     maskclip_distill_loss = 0.0
-            #     for distill_mask in outputs.distill_masks:
-            #         maskclip_distill_loss = maskclip_distill_loss + F.smooth_l1_loss(
-            #             distill_mask, maskclip_mask
-            #         )
-            #     loss = (
-            #         loss
-            #         + self.config.sparse_config["maskclip_distill_loss_weight"]
-            #         * maskclip_distill_loss
-            #     )
-            # # ----------------------------------------------------------#
-            # ----------------------------------------------------------#
-            if maskclip_mask is not None and len(maskclip_mask):
-                maskclip_distill_loss = 0.0
-                for mask in outputs.masks:
-                    # # l1loss
-                    # maskclip_distill_loss = maskclip_distill_loss + F.l1_loss(
-                    #     mask, maskclip_mask
-                    # )
-
-                    # # ce loss
-                    # maskclip_distill_loss = maskclip_distill_loss + F.cross_entropy(
-                    #     image_score_predictor_logit.permute(0, 2, 1),
-                    #     (1 - maskclip_mask).long(),
-                    # )
-
-                    # # lovasz loss
-                    # from .lovasz_loss import lovasz_softmax_1d
-
-                    # maskclip_distill_loss = maskclip_distill_loss + lovasz_softmax_1d(
-                    #     image_score_predictor_logit.permute(0, 2, 1),
-                    #     (1 - maskclip_mask).long(),
-                    #     per_image=True,
-                    # )
-
-                    # bce loss
-                    maskclip_distill_loss = (
-                        maskclip_distill_loss
-                        + F.binary_cross_entropy_with_logits(
-                            (mask - 0.5) * 10,
-                            maskclip_mask.float(),
-                        )
-                    )
-                loss = (
-                    loss
-                    + self.config.sparse_config["maskclip_distill_loss_weight"]
-                    * maskclip_distill_loss
                 )
             # ----------------------------------------------------------#
 

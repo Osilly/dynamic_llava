@@ -10,8 +10,7 @@ from llava.constants import (
 )
 from llava.conversation import conv_templates, SeparatorStyle
 
-# from llava.model.builder import load_pretrained_model
-from llava.model.dynamic_llava_builder import load_pretrained_model
+from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import (
     process_images,
@@ -60,9 +59,6 @@ def eval_model(args):
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         args.model_path, args.model_base, model_name
     )
-    model.model.config.sparse_config["use_vision_predictor"] = True
-    model.model.config.sparse_config["use_instruct_predictor"] = False
-    model.model.config.sparse_config["use_output_text_predictor"] = False
     model_memory = torch.cuda.max_memory_allocated()
     print("model memory: " + str(model_memory))
 
@@ -109,57 +105,47 @@ def eval_model(args):
     image_files = image_parser(args)
     images = load_images(image_files)
     image_sizes = [x.size for x in images]
-    images_tensor = process_images(images, image_processor, model.config).to(
-        model.device, dtype=torch.float16
+    images_tensor = (
+        process_images(images, image_processor, model.config)
+        .to(model.device, dtype=torch.float16)
+        .repeat(args.batch_size, 1, 1, 1)
     )
-    # print(images_tensor.shape)
 
-    # input_ids = (
-    #     tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-    #     .unsqueeze(0)
-    #     .cuda()
-    # )
-    input_ids = torch.tensor([[1, -200, 1]]).cuda()
+    input_ids = torch.tensor([[1, -200, 1]]).cuda().repeat(args.batch_size, 1)
 
-    # start = time.time()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    for _ in range(20):
+        with torch.inference_mode():
+            start_event.record()
+            outputs = model.generate(
+                input_ids,
+                images=images_tensor,
+                image_sizes=image_sizes,
+                do_sample=True if args.temperature > 0 else False,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                num_beams=args.num_beams,
+                use_cache=True,
+                output_scores=True,
+                return_dict_in_generate=True,
+                min_new_tokens=1,
+                max_new_tokens=1,
+            )
+            end_event.record()
+            torch.cuda.synchronize()
+            elapsed_time_ms = start_event.elapsed_time(end_event)
+            print("prefill time: " + str(elapsed_time_ms) + "ms")
+
     torch.cuda.reset_max_memory_allocated()
-    with torch.inference_mode():
-        outputs = model.generate(
-            input_ids,
-            images=images_tensor,
-            image_sizes=image_sizes,
-            do_sample=True if args.temperature > 0 else False,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            num_beams=args.num_beams,
-            use_cache=True,
-            output_scores=True,
-            return_dict_in_generate=True,
-            min_new_tokens=2,
-            max_new_tokens=2,
-        )
-
     max_memory = torch.cuda.max_memory_allocated()
     print("max memory: " + str(max_memory))
     print("without model memory: " + str(max_memory - model_memory))
-    # end = time.time()
-    # print("time:\n", end - start)
-
-    # output_ids = outputs.sequences
-    # text = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
-    # print("text:\n" + text)
-
-    # logits = outputs.scores
-    # probs = [torch.softmax(logit, dim=-1) for logit in logits]
-    # log_probs = [torch.log(prob) for prob in probs]
-    # max_log_probs = [torch.max(log_prob) for log_prob in log_probs]
-    # ppls = [torch.exp(-max_log_prob).item() for max_log_prob in max_log_probs]
-    # mean_ppl = sum(ppls) / len(ppls)
-    # print("mean perplexity:\n" + str(mean_ppl))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--model-path", type=str, default="facebook/opt-350m")
     parser.add_argument("--model-base", type=str, default=None)
     parser.add_argument("--image-file", type=str, required=True)
