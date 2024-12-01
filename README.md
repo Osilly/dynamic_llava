@@ -290,3 +290,6 @@ python eval/eval.py --tier testdev_balanced
 
 ```
 
+## Acknowledgements
+
+This project is based on [LLaVA](https://github.com/haotian-liu/LLaVA). Thanks for their wonderful works.
