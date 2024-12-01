@@ -26,8 +26,6 @@ from PIL import Image
 from io import BytesIO
 import re
 
-import time
-
 
 def image_parser(args):
     out = args.image_file.split(args.sep)
@@ -113,10 +111,7 @@ def eval_model(args):
         .cuda()
     )
 
-    start = time.time()
     with torch.inference_mode():
-        # model.model.config.sparse_config["use_output_text_predictor"] = False
-        # model.model.config.sparse_config["use_vision_predictor"] = False
         outputs = model.generate(
             input_ids,
             images=images_tensor,
@@ -131,22 +126,11 @@ def eval_model(args):
             return_dict_in_generate=True,
         )
 
-    end = time.time()
-    print("time:\n", end - start)
-
     output_ids = outputs.sequences
     text = [
         t.strip() for t in tokenizer.batch_decode(output_ids, skip_special_tokens=True)
     ]
     print("text:\n" + str(text))
-
-    logits = outputs.scores
-    probs = [torch.softmax(logit, dim=-1) for logit in logits]
-    log_probs = [torch.log(prob) for prob in probs]
-    max_log_probs = [torch.max(log_prob) for log_prob in log_probs]
-    ppls = [torch.exp(-max_log_prob).item() for max_log_prob in max_log_probs]
-    mean_ppl = sum(ppls) / len(ppls)
-    print("mean perplexity:\n" + str(mean_ppl))
 
 
 if __name__ == "__main__":

@@ -35,12 +35,6 @@ special_text = {
 }
 
 
-# def forward_hook(forward_data, module, input, output):
-#     # print(f"Inside {module.__class__.__name__} forward")
-#     # forward_data["inputs"].append(input)
-#     forward_data["outputs"].append((output[:, :, 0] > output[:, :, 1]))
-
-
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
     chunk_size = math.ceil(len(lst) / n)  # integer division
@@ -65,11 +59,6 @@ def eval_model(args):
     )
 
     model_memory = torch.cuda.max_memory_allocated()
-    # print("model_memory: " + str(model_memory / (10**9)) + "G")
-
-    # questions = json.load(open(os.path.expanduser(args.question_file), "r"))
-    # questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
-
     questions = json.load(open(os.path.expanduser(args.question_file), "r"))
 
     answers_file = os.path.expanduser(args.answers_file)
@@ -151,45 +140,25 @@ def eval_model(args):
                 .unsqueeze(0)
             )
 
-            # forward_data = {"inputs": [], "outputs": []}
-            # hook_function = partial(forward_hook, forward_data)
-            # hook = model.model.output_text_score_predictor.register_forward_hook(
-            #     hook_function
-            # )
-
             if j > 0:
                 images = None
                 image_sizes = None
 
+            if j == 0:
+                total_token_length += images.shape[-2] * images.shape[-1] // 14 // 14
+                total_token_length += input_ids.shape[-1] - 1
+                instruct_token_length += input_ids.shape[-1] - 1
+            else:
+                total_token_length += input_ids.shape[-1]
+                output_token_length += input_ids.shape[-1]
+
             with torch.inference_mode():
-                # outputs = model.generate(
-                #     input_ids,
-                #     images=images,
-                #     image_sizes=image_sizes,
-                #     do_sample=True if args.temperature > 0 else False,
-                #     temperature=args.temperature,
-                #     max_new_tokens=1,
-                #     use_cache=True,
-                #     output_scores=True,
-                #     return_dict_in_generate=True,
-                #     past_key_values=past_key_values,
-                # )
-                if j == 0:
-                    total_token_length += (
-                        images.shape[-2] * images.shape[-1] // 14 // 14
-                    )
-                    total_token_length += input_ids.shape[-1] - 1
-                    instruct_token_length += input_ids.shape[-1] - 1
-                else:
-                    total_token_length += input_ids.shape[-1]
-                    output_token_length += input_ids.shape[-1]
                 outputs = model(
                     input_ids,
                     images=images,
                     image_sizes=image_sizes,
                     past_key_values=past_key_values,
                 )
-            # input_ids = torch.cat([input_ids, label_id.unsqueeze(0)], dim=1)
             input_ids = label_id
             past_key_values = outputs.past_key_values
 
@@ -212,29 +181,15 @@ def eval_model(args):
                 )
 
             # ppl
-            # logits = outputs.scores[0]
             logit = outputs.logits[:, -1:, :]
             logits.append(logit)
             labels.append(label_id)
-
-            # # output token decision
-            # if answer_hard_decisions is not None:
-            #     answer_hard_decisions.append(forward_data["outputs"][0][0, 0].item())
-            # else:
-            #     answer_hard_decisions = []
-
-            # hook.remove()
 
         logits = torch.cat(logits, dim=1).squeeze(0)
         labels = torch.cat(labels, dim=1).squeeze(0)
         log_probs = F.cross_entropy(logits, labels)
         ppls = torch.exp(log_probs).item()
         sum_ppl += ppls
-
-        # masked_answer_token_rate = (
-        #     len(answer_hard_decisions) - sum(answer_hard_decisions)
-        # ) / len(answer_hard_decisions)
-        # sum_masked_answer_token_rate += masked_answer_token_rate
 
         sum_total_token_length += total_token_length
         sum_instruct_token_length += instruct_token_length
@@ -249,30 +204,21 @@ def eval_model(args):
                 {
                     "question_id": idx,
                     "prompt": cur_prompt,
-                    # "answer": answer[4:-4],
                     "answer_id": ans_id,
                     "model_id": model_name,
                     "metadata": {},
-                    # "answer_hard_decisions": str(answer_hard_decisions),
-                    # "answer_token_len": str(len(answer_hard_decisions) + 1),
-                    # "masked_answer_token_len": str(masked_input_ids.shape[1]),
                     "total_token_length": str(total_token_length),
                     "instruct_token_length": str(instruct_token_length),
                     "output_token_length": str(output_token_length),
                     "output_cache_length": str(output_cache_length),
                     "max_prefill_memory": str(max_prefill_memory),
                     "max_decode_memory": str(max_decode_memory),
-                    # "masked_answer_token_rate": str(masked_answer_token_rate),
-                    # "masked_answer": masked_answer,
                     "ppl": str(ppls),
                 }
             )
             + "\n"
         )
         ans_file.flush()
-        # print(str(outputs.sequences.shape[1]), answer)
-        # print(str(masked_input_ids.shape[1]), masked_answer)
-        # print(str(ppl))
 
     ans_file.write(
         json.dumps(
@@ -285,9 +231,6 @@ def eval_model(args):
                 "mean_output_cache_length": str(sum_output_cache_length / total_num),
                 "mean_max_prefill_memory": str(sum_max_prefill_memory / total_num),
                 "mean_max_decode_memory": str(sum_max_decode_memory / total_num),
-                # "mean_masked_answer_token_rate": str(
-                #     sum_masked_answer_token_rate / total_num
-                # ),
                 "mean_ppl": str(sum_ppl / total_num),
             }
         )

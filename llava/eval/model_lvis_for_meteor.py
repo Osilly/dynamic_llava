@@ -35,21 +35,12 @@ from nltk.translate.meteor_score import single_meteor_score
 
 nltk.data.path.append("llava/eval/bench_test/nltk_data")
 
-# nltk.download("punkt_tab")
-# nltk.download("punkt")
-# nltk.download("wordnet")
 
 special_text = {
     "ASSISTANT:": [319, 1799, 9047, 13566, 29901],
     "USER:": [11889, 29901],
     "</s>": [2],
 }
-
-
-# def forward_hook(forward_data, module, input, output):
-#     # print(f"Inside {module.__class__.__name__} forward")
-#     # forward_data["inputs"].append(input)
-#     forward_data["outputs"].append((output[:, :, 0] > output[:, :, 1]))
 
 
 def split_list(lst, n):
@@ -76,10 +67,6 @@ def eval_model(args):
     )
 
     model_memory = torch.cuda.max_memory_allocated()
-    # print("model_memory: " + str(model_memory / (10**9)) + "G")
-
-    # questions = json.load(open(os.path.expanduser(args.question_file), "r"))
-    # questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
 
     questions = json.load(open(os.path.expanduser(args.question_file), "r"))
 
@@ -89,7 +76,6 @@ def eval_model(args):
 
     total_num = 0
     sum_meteor = 0.0
-    # sum_masked_answer_token_rate = 0.0
     sum_total_token_length = 0
     sum_instruct_token_length = 0
     sum_output_token_length = 0
@@ -103,8 +89,6 @@ def eval_model(args):
         cur_prompt = qs
         label_answer = line["answer"].strip()
         split_label_answer = word_tokenize(label_answer.lower())
-        # split_label_answer = word_tokenizer(label_answer)
-        # print(split_label_answer)
 
         try:
             total_num += 1
@@ -142,13 +126,9 @@ def eval_model(args):
             .cuda()
         )
 
-        # label_answer += "</s>"
-        # label_ids = tokenizer(label_answer).input_ids[1:]
         past_key_values = None
-        # answer_hard_decisions = None
         logits = []
         labels = []
-        # masked_input_ids = None
         total_token_length = 0
         instruct_token_length = 0
         output_token_length = 0
@@ -161,44 +141,19 @@ def eval_model(args):
         answer_ids = None
 
         for j in range(args.max_new_tokens):
-            # label_id = (
-            #     torch.tensor([label_id])
-            #     .to(dtype=input_ids.dtype, device=input_ids.device)
-            #     .unsqueeze(0)
-            # )
-
-            # forward_data = {"inputs": [], "outputs": []}
-            # hook_function = partial(forward_hook, forward_data)
-            # hook = model.model.output_text_score_predictor.register_forward_hook(
-            #     hook_function
-            # )
-
             if j > 0:
                 images = None
                 image_sizes = None
 
+            if j == 0:
+                total_token_length += images.shape[-2] * images.shape[-1] // 14 // 14
+                total_token_length += input_ids.shape[-1] - 1
+                instruct_token_length += input_ids.shape[-1] - 1
+            else:
+                total_token_length += input_ids.shape[-1]
+                output_token_length += input_ids.shape[-1]
+
             with torch.inference_mode():
-                # outputs = model.generate(
-                #     input_ids,
-                #     images=images,
-                #     image_sizes=image_sizes,
-                #     do_sample=True if args.temperature > 0 else False,
-                #     temperature=args.temperature,
-                #     max_new_tokens=1,
-                #     use_cache=True,
-                #     output_scores=True,
-                #     return_dict_in_generate=True,
-                #     past_key_values=past_key_values,
-                # )
-                if j == 0:
-                    total_token_length += (
-                        images.shape[-2] * images.shape[-1] // 14 // 14
-                    )
-                    total_token_length += input_ids.shape[-1] - 1
-                    instruct_token_length += input_ids.shape[-1] - 1
-                else:
-                    total_token_length += input_ids.shape[-1]
-                    output_token_length += input_ids.shape[-1]
                 outputs = model(
                     input_ids,
                     images=images,
@@ -207,7 +162,6 @@ def eval_model(args):
                 )
 
             answer_id = torch.argmax(outputs.logits[0, -1:, :], dim=-1).unsqueeze(0)
-            # print(answer_id)
             input_ids = answer_id
 
             if answer_ids is not None:
@@ -238,42 +192,14 @@ def eval_model(args):
                     past_key_values[-1][0].shape[-2] - prefill_cache_length
                 )
 
-            # ppl
-            # logit = outputs.logits[:, -1:, :]
-            # logits.append(logit)
-
-            # # output token decision
-            # if answer_hard_decisions is not None:
-            #     answer_hard_decisions.append(forward_data["outputs"][0][0, 0].item())
-            # else:
-            #     answer_hard_decisions = []
-
-            # hook.remove()
-
             if answer_id[0, 0] == special_text["</s>"][0]:
                 break
 
         answer = tokenizer.batch_decode(answer_ids, skip_special_tokens=True)[0].strip()
-        # split_answer = word_tokenizer(answer)
         split_answer = word_tokenize(answer)
 
-        # score = bleu_score(split_answer, split_label_answer)
-        # print(split_answer)
-        # print(split_label_answer)
         meteor = single_meteor_score(split_label_answer, split_answer)
         sum_meteor += meteor
-        # print(meteor)
-
-        # logits = torch.cat(logits, dim=1).squeeze(0)
-        # labels = torch.cat(labels, dim=1).squeeze(0)
-        # log_probs = F.cross_entropy(logits, labels)
-        # ppls = torch.exp(log_probs).item()
-        # sum_ppl += ppls
-
-        # masked_answer_token_rate = (
-        #     len(answer_hard_decisions) - sum(answer_hard_decisions)
-        # ) / len(answer_hard_decisions)
-        # sum_masked_answer_token_rate += masked_answer_token_rate
 
         sum_total_token_length += total_token_length
         sum_instruct_token_length += instruct_token_length
@@ -288,30 +214,21 @@ def eval_model(args):
                 {
                     "question_id": idx,
                     "prompt": cur_prompt,
-                    # "answer": answer[4:-4],
                     "answer_id": ans_id,
                     "model_id": model_name,
                     "metadata": {},
-                    # "answer_hard_decisions": str(answer_hard_decisions),
-                    # "answer_token_len": str(len(answer_hard_decisions) + 1),
-                    # "masked_answer_token_len": str(masked_input_ids.shape[1]),
                     "total_token_length": str(total_token_length),
                     "instruct_token_length": str(instruct_token_length),
                     "output_token_length": str(output_token_length),
                     "output_cache_length": str(output_cache_length),
                     "max_prefill_memory": str(max_prefill_memory),
                     "max_decode_memory": str(max_decode_memory),
-                    # "masked_answer_token_rate": str(masked_answer_token_rate),
-                    # "masked_answer": masked_answer,
                     "meteor": str(meteor),
                 }
             )
             + "\n"
         )
         ans_file.flush()
-        # print(str(outputs.sequences.shape[1]), answer)
-        # print(str(masked_input_ids.shape[1]), masked_answer)
-        # print(str(ppl))
 
     ans_file.write(
         json.dumps(
@@ -324,9 +241,6 @@ def eval_model(args):
                 "mean_output_cache_length": str(sum_output_cache_length / total_num),
                 "mean_max_prefill_memory": str(sum_max_prefill_memory / total_num),
                 "mean_max_decode_memory": str(sum_max_decode_memory / total_num),
-                # "mean_masked_answer_token_rate": str(
-                #     sum_masked_answer_token_rate / total_num
-                # ),
                 "mean_ppl": str(sum_meteor / total_num),
             }
         )

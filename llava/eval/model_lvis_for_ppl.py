@@ -59,10 +59,6 @@ def eval_model(args):
     )
 
     model_memory = torch.cuda.max_memory_allocated()
-    # print("model_memory: " + str(model_memory / (10**9)) + "G")
-
-    # questions = json.load(open(os.path.expanduser(args.question_file), "r"))
-    # questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
 
     questions = json.load(open(os.path.expanduser(args.question_file), "r"))
 
@@ -142,43 +138,26 @@ def eval_model(args):
                 .to(dtype=input_ids.dtype, device=input_ids.device)
                 .unsqueeze(0)
             )
-            # if j == 0:
-            #     input_ids = torch.cat([input_ids, label_id], dim=1)
-            #     continue
 
             if j > 0:
                 images = None
                 image_sizes = None
 
+            if j == 0:
+                total_token_length += images.shape[-2] * images.shape[-1] // 14 // 14
+                total_token_length += input_ids.shape[-1] - 1
+                instruct_token_length += input_ids.shape[-1] - 1
+            else:
+                total_token_length += input_ids.shape[-1]
+                output_token_length += input_ids.shape[-1]
+
             with torch.inference_mode():
-                # outputs = model.generate(
-                #     input_ids,
-                #     images=images,
-                #     image_sizes=image_sizes,
-                #     do_sample=True if args.temperature > 0 else False,
-                #     temperature=args.temperature,
-                #     max_new_tokens=1,
-                #     use_cache=True,
-                #     output_scores=True,
-                #     return_dict_in_generate=True,
-                #     past_key_values=past_key_values,
-                # )
-                if j == 0:
-                    total_token_length += (
-                        images.shape[-2] * images.shape[-1] // 14 // 14
-                    )
-                    total_token_length += input_ids.shape[-1] - 1
-                    instruct_token_length += input_ids.shape[-1] - 1
-                else:
-                    total_token_length += input_ids.shape[-1]
-                    output_token_length += input_ids.shape[-1]
                 outputs = model(
                     input_ids,
                     images=images,
                     image_sizes=image_sizes,
                     past_key_values=past_key_values,
                 )
-            # input_ids = torch.cat([input_ids, label_id.unsqueeze(0)], dim=1)
             input_ids = label_id
             past_key_values = outputs.past_key_values
 
@@ -200,38 +179,9 @@ def eval_model(args):
                     past_key_values[0][-1][0].shape[-2] - prefill_cache_length
                 )
 
-            # answer = tokenizer.batch_decode(
-            #     outputs.sequences[:, -1], skip_special_tokens=False
-            # )[0].strip()
-            # print(
-            #     answer,
-            #     tokenizer.batch_decode(label_id, skip_special_tokens=False)[0].strip(),
-            # )
-            # print(past_key_values[3][0].shape)
-            # print(forward_data["outputs"])
-
-            # ppl
-            # logits = outputs.scores[0]
             logit = outputs.logits[:, -1:, :]
             logits.append(logit)
             labels.append(label_id)
-
-            # if masked_input_ids is not None:
-            #     masked_input_ids = torch.cat(
-            #         [
-            #             masked_input_ids,
-            #             outputs.sequences[:, -1:][
-            #                 torch.tensor(answer_hard_decisions).unsqueeze(0) == False
-            #             ].unsqueeze(0),
-            #         ],
-            #         dim=1,
-            #     )
-            # else:
-            #     masked_input_ids = outputs.sequences[:, -1:][
-            #         torch.tensor(answer_hard_decisions).unsqueeze(0) == False
-            #     ].unsqueeze(0)
-
-            # print(len(forward_data["outputs"]), forward_data["outputs"])
 
         logits = torch.cat(logits, dim=1).squeeze(0)
         labels = torch.cat(labels, dim=1).squeeze(0)
@@ -256,26 +206,18 @@ def eval_model(args):
                     "answer_id": ans_id,
                     "model_id": model_name,
                     "metadata": {},
-                    # "answer_hard_decisions": str(answer_hard_decisions),
-                    # "answer_token_len": str(len(answer_hard_decisions) + 1),
-                    # "masked_answer_token_len": str(masked_input_ids.shape[1]),
                     "total_token_length": str(total_token_length),
                     "instruct_token_length": str(instruct_token_length),
                     "output_token_length": str(output_token_length),
                     "output_cache_length": str(output_cache_length),
                     "max_prefill_memory": str(max_prefill_memory),
                     "max_decode_memory": str(max_decode_memory),
-                    # "masked_answer_token_rate": str(masked_answer_token_rate),
-                    # "masked_answer": masked_answer,
                     "ppl": str(ppls),
                 }
             )
             + "\n"
         )
         ans_file.flush()
-        # print(str(outputs.sequences.shape[1]), answer)
-        # print(str(masked_input_ids.shape[1]), masked_answer)
-        # print(str(ppl))
 
     ans_file.write(
         json.dumps(
@@ -288,9 +230,6 @@ def eval_model(args):
                 "mean_output_cache_length": str(sum_output_cache_length / total_num),
                 "mean_max_prefill_memory": str(sum_max_prefill_memory / total_num),
                 "mean_max_decode_memory": str(sum_max_decode_memory / total_num),
-                # "mean_masked_answer_token_rate": str(
-                #     sum_masked_answer_token_rate / total_num
-                # ),
                 "mean_ppl": str(sum_ppl / total_num),
             }
         )

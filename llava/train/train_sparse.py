@@ -138,13 +138,6 @@ class TrainingArguments(transformers.TrainingArguments):
 
     gumbel_start_tau: float = 1.0
     gumbel_end_tau: float = 0.1
-
-    # output_text_len_for_training_step: List[int] = field(default_factory=lambda: [0])
-    # output_text_len_for_training_decay: List[int] = field(default_factory=lambda: [50])
-    # instruct_len_for_training_step: List[int] = field(default_factory=lambda: [0])
-    # instruct_len_for_training_decay: List[int] = field(default_factory=lambda: [25])
-    # output_text_keep_rate_step: int = 4000
-    # instruct_keep_rate_step: int = 4000
     # ----------------------------------------------------------#
 
 
@@ -154,7 +147,6 @@ class SparseArguments:
     use_vision_predictor: bool = True
     vision_keep_rate: float = 0.2
 
-    # use_output_text_predictor: bool = True
     use_text_predictor: bool = True
 
     use_output_text_predictor: bool = True
@@ -171,11 +163,6 @@ class SparseArguments:
     dim_feedforward: int = 2048
     num_layers: int = 2
     mask_loss_weight: float = 100.0
-
-    maskclip: Optional[str] = field(default=None)
-    maskclip_distill_token_rate: float = 0.2
-    maskclip_distill_loss_weight: float = 1.0
-    similar_postive_num: int = 5
 
 
 # ----------------------------------------------------------#
@@ -1163,13 +1150,6 @@ def train(attn_implementation=None):
         training_args.use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
-
-    if sparse_args.maskclip is not None:
-        model.get_model().initialize_maskclip(
-            sparse_args=sparse_args, tokenizer=tokenizer
-        )
-        for p in model.get_model().maskclip.parameters():
-            p.requires_grad = False
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer

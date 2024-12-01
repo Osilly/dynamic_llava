@@ -57,10 +57,6 @@ def eval_model(args):
         model_path, args.model_base, model_name
     )
     model_memory = torch.cuda.max_memory_allocated()
-    # print("model_memory: " + str(model_memory / (10**9)) + "G")
-
-    # questions = json.load(open(os.path.expanduser(args.question_file), "r"))
-    # questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
 
     questions = json.load(open(os.path.expanduser(args.question_file), "r"))
 
@@ -167,29 +163,18 @@ def eval_model(args):
                     images = None
                     image_sizes = None
 
+                if j == 0:
+                    if images is not None:
+                        total_token_length += (
+                            images.shape[-2] * images.shape[-1] // 14 // 14
+                        )
+                    total_token_length += input_ids.shape[-1]
+                    instruct_token_length += input_ids.shape[-1]
+                else:
+                    total_token_length += input_ids.shape[-1]
+                    output_token_length += input_ids.shape[-1]
+
                 with torch.inference_mode():
-                    # outputs = model.generate(
-                    #     input_ids,
-                    #     images=images,
-                    #     image_sizes=image_sizes,
-                    #     do_sample=True if args.temperature > 0 else False,
-                    #     temperature=args.temperature,
-                    #     max_new_tokens=1,
-                    #     use_cache=True,
-                    #     output_scores=True,
-                    #     return_dict_in_generate=True,
-                    #     past_key_values=past_key_values,
-                    # )
-                    if j == 0:
-                        if images is not None:
-                            total_token_length += (
-                                images.shape[-2] * images.shape[-1] // 14 // 14
-                            )
-                        total_token_length += input_ids.shape[-1]
-                        instruct_token_length += input_ids.shape[-1]
-                    else:
-                        total_token_length += input_ids.shape[-1]
-                        output_token_length += input_ids.shape[-1]
                     outputs = model(
                         input_ids,
                         images=images,
@@ -215,30 +200,13 @@ def eval_model(args):
                     )
 
                 if round == len(label_answer_list) - 1 and j == len(label_ids) - 1:
-                    # max_decode_memory = (
-                    #     torch.cuda.max_memory_allocated()
-                    #     - max_prefill_memory
-                    #     - model_memory
-                    # )
                     output_cache_length = (
                         past_key_values[0][-1][0].shape[-2] - prefill_cache_length
                     )
 
-                # input_ids = torch.cat([input_ids, label_id.unsqueeze(0)], dim=1)
                 input_ids = label_id
 
-                # answer = tokenizer.batch_decode(
-                #     outputs.sequences[:, -1], skip_special_tokens=False
-                # )[0].strip()
-                # print(
-                #     answer,
-                #     tokenizer.batch_decode(label_id, skip_special_tokens=False)[0].strip(),
-                # )
-                # print(past_key_values[3][0].shape)
-                # print(forward_data["outputs"])
-
                 # ppl
-                # logits = outputs.scores[0]
                 logit = outputs.logits[:, -1:, :]
                 logits.append(logit)
                 labels.append(label_id)
@@ -248,7 +216,6 @@ def eval_model(args):
             log_probs = F.cross_entropy(logits, labels)
             ppls = torch.exp(log_probs).item()
             round_ppl_list.append(ppls)
-            # sum_ppl += ppls
 
         mean_round_ppl = sum(round_ppl_list) / len(round_ppl_list)
 
@@ -271,9 +238,6 @@ def eval_model(args):
                     "answer_id": ans_id,
                     "model_id": model_name,
                     "metadata": {},
-                    # "answer_hard_decisions": str(round_answer_hard_decisions_list),
-                    # "answer_token_len": str(len(answer_hard_decisions) + 1),
-                    # "masked_answer_token_len": str(masked_input_ids.shape[1]),
                     "total_token_length": str(total_token_length),
                     "instruct_token_length": str(instruct_token_length),
                     "output_token_length": str(output_token_length),
@@ -287,9 +251,6 @@ def eval_model(args):
             + "\n"
         )
         ans_file.flush()
-        # print(str(outputs.sequences.shape[1]), answer)
-        # print(str(masked_input_ids.shape[1]), masked_answer)
-        # print(str(ppl))
 
     ans_file.write(
         json.dumps(
