@@ -2,6 +2,10 @@
 
 The official pytorch implement of "Dynamic-LLaVA: Efficient Multimodal Large Language Models via Dynamic Vision-language Context Sparsification".
 
+<p align="center">
+&nbsp&nbsp🤗 <a href="https://huggingface.co/Osilly/Dynamic-LLaVA-7B">Dynamic-LLaVA-7B</a>&nbsp&nbsp | &nbsp&nbsp🤗 <a href="https://huggingface.co/Osilly/Dynamic-LLaVA-13B">Dynamic-LLaVA-13B</a>&nbsp&nbsp | &nbsp&nbsp📑 <a href="https://arxiv.org/abs/2412.00876">Paper</a>&nbsp&nbsp
+</p>
+
 ## Environment
 
 Keep your workspace path is in the code, and then:
